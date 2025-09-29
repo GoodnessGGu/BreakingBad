@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: iqoptions-tradebot
+    env: python
+    plan: free
+    region: frankfurt   # or oregon if closer
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python telegram_bot.py"
+    envVars:
+      - key: IQ_EMAIL
+        sync: false   # add in Render dashboard
+      - key: IQ_PASSWORD
+        sync: false   # add in Render dashboard
+      - key: TELEGRAM_TOKEN
+        sync: false   # add in Render dashboard
