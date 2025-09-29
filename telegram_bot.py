@@ -1,113 +1,135 @@
-import os
+# main.py
+import sys
 import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from iqclient import IQOptionAPI
-from main import parse_signals
 import asyncio
+import re
+from datetime import datetime, date
+from collections import defaultdict
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+# Configure console to support emojis
+sys.stdout.reconfigure(encoding="utf-8")
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s"
+)
 logger = logging.getLogger(__name__)
 
-# Load credentials from environment variables (Render dashboard)
-EMAIL = os.getenv("IQ_EMAIL")
-PASSWORD = os.getenv("IQ_PASSWORD")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# Ensure credentials exist
-if not EMAIL or not PASSWORD or not TELEGRAM_TOKEN:
-    raise RuntimeError("❌ Missing environment variables: IQ_EMAIL, IQ_PASSWORD, TELEGRAM_TOKEN")
-
-# Initialize IQOption API
-api = IQOptionAPI()
-api._connect()
-
-# Handlers
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 Trading Bot is online!\nUse /balance or /signals to get started.")
-
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bal = api.get_current_account_balance()
-    await update.message.reply_text(f"💰 Current Balance: ${bal:.2f}")
-
-async def refill(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    success = api.refill_practice_account()
-    if success:
-        await update.message.reply_text("🔄 Demo account refilled successfully!")
-    else:
-        await update.message.reply_text("⚠️ Failed to refill demo account.")
-
-async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def load_signals(file_path="signals.txt"):
     """
-    Accept pasted signals in semicolon format via /signals command.
+    Load raw signals text from a file.
     """
-    if not context.args:
-        await update.message.reply_text("⚠️ Please paste signals in the format:\nHH:MM;ASSET;CALL|PUT;MINS")
-        return
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        logger.warning(f"⚠️ No signals file found at {file_path}")
+        return ""
 
-    signals_text = " ".join(context.args).replace(",", "\n")
-    signals = parse_signals(signals_text)
 
+def parse_signals(text: str):
+    """
+    Parse signals from format: HH:MM;ASSET;DIRECTION;EXPIRY
+    Example: 06:15;EURUSD;CALL;5
+    """
+    signals = []
+    pattern = re.compile(r"(\d{2}:\d{2});([A-Z]+);(CALL|PUT);(\d+)", re.IGNORECASE)
+
+    for line in text.splitlines():
+        m = pattern.search(line.strip())
+        if not m:
+            continue
+        time_str, asset, direction, expiry = m.groups()
+        hh, mm = map(int, time_str.split(":"))
+        scheduled_dt = datetime.combine(date.today(), datetime.min.time()).replace(
+            hour=hh, minute=mm, second=0
+        )
+        signals.append({
+            "time": scheduled_dt,
+            "asset": asset,
+            "direction": direction.lower(),
+            "expiry": int(expiry),
+            "line": line.strip(),
+        })
+    return sorted(signals, key=lambda x: x["time"])
+
+
+def run_trade(api, asset, direction, expiry, amount, max_gales=2):
+    """
+    Place trade with digital only, run martingale loop.
+    This runs in a separate thread when launched from asyncio.
+    """
+    current_amount = amount
+    for gale in range(max_gales + 1):
+        success, order_id = api.execute_digital_option_trade(
+            asset, current_amount, direction, expiry=expiry
+        )
+
+        if not success:
+            logger.error(f"❌ Failed to place trade on {asset} (Digital only)")
+            return
+
+        logger.info(
+            f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} (Expiry {expiry}m)"
+        )
+        pnl_ok, pnl = api.get_trade_outcome(order_id, expiry=expiry)
+        balance = api.get_current_account_balance()
+
+        if pnl_ok and pnl > 0:
+            if gale == 0:
+                logger.info(
+                    f"✅ Direct WIN on {asset} | Profit: ${pnl:.2f} | Balance: ${balance:.2f}"
+                )
+            else:
+                logger.info(
+                    f"🔥 WIN after Gale {gale} on {asset} | Profit: ${pnl:.2f} | Balance: ${balance:.2f}"
+                )
+            return
+        else:
+            logger.warning(
+                f"⚠️ LOSS on {asset} | Attempt {gale} | PnL: {pnl} | Balance: ${balance:.2f}"
+            )
+            current_amount *= 2  # Martingale
+
+    logger.error(f"💀 Lost all attempts (Direct + {max_gales} Gales) on {asset}")
+
+
+async def process_signals(api, raw_text: str):
+    """
+    Process raw signals (from text or file) and run trades in parallel by schedule.
+    """
+    signals = parse_signals(raw_text)
     if not signals:
-        await update.message.reply_text("❌ No valid signals found.")
+        logger.info("No valid signals found.")
         return
 
-    await update.message.reply_text(f"📊 Loaded {len(signals)} signals. Scheduling trades...")
-    asyncio.create_task(run_signals(signals))
-
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Accept a signals.txt file upload.
-    """
-    file = await update.message.document.get_file()
-    content = await file.download_as_bytearray()
-    signals_text = content.decode("utf-8").strip()
-
-    signals = parse_signals(signals_text)
-    if not signals:
-        await update.message.reply_text("❌ No valid signals found in file.")
-        return
-
-    await update.message.reply_text(f"📊 Loaded {len(signals)} signals from file. Scheduling trades...")
-    asyncio.create_task(run_signals(signals))
-
-async def run_signals(signals):
-    """
-    Run signals asynchronously in background.
-    """
-    from main import run_trade  # import here to avoid circular import
-
-    grouped = {}
+    grouped = defaultdict(list)
     for sig in signals:
-        grouped.setdefault(sig["time"], []).append(sig)
+        grouped[sig["time"]].append(sig)
 
     for sched_time in sorted(grouped.keys()):
         now = datetime.now()
         delay = (sched_time - now).total_seconds()
         if delay > 0:
-            logger.info(f"⏳ Waiting {int(delay)}s until {sched_time.strftime('%H:%M')}")
+            logger.info(
+                f"\n⏳ Waiting {int(delay)}s until {sched_time.strftime('%H:%M')} "
+                f"for {len(grouped[sched_time])} signal(s)..."
+            )
             await asyncio.sleep(delay)
 
-        logger.info(f"🚀 Executing {len(grouped[sched_time])} signal(s) at {sched_time.strftime('%H:%M')}")
-        tasks = [
-            asyncio.to_thread(run_trade, api, sig["asset"], sig["direction"], sig["expiry"], 1)
-            for sig in grouped[sched_time]
-        ]
-        await asyncio.gather(*tasks)
+        logger.info(
+            f"\n🚀 Executing {len(grouped[sched_time])} signal(s) scheduled at {sched_time.strftime('%H:%M')}"
+        )
+        for sig in grouped[sched_time]:
+            logger.info(f"📊 Signal: {sig['line']}")
 
-# Bot setup
-def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("balance", balance))
-    app.add_handler(CommandHandler("refill", refill))
-    app.add_handler(CommandHandler("signals", signals))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-
-    logger.info("🤖 Telegram bot is running...")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+        await asyncio.gather(
+            *(
+                asyncio.to_thread(
+                    run_trade, api, sig["asset"], sig["direction"], sig["expiry"], 1
+                )
+                for sig in grouped[sched_time]
+            )
+        )

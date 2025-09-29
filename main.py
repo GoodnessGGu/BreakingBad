@@ -5,7 +5,6 @@ import asyncio
 import re
 from datetime import datetime, date
 from collections import defaultdict
-from iqclient import IQOptionAPI  # using your renamed IQOptionAPI
 
 # Configure console to support emojis
 sys.stdout.reconfigure(encoding="utf-8")
@@ -64,7 +63,6 @@ def run_trade(api, asset, direction, expiry, amount, max_gales=2):
     """
     current_amount = amount
     for gale in range(max_gales + 1):
-        # Try digital trade
         success, order_id = api.execute_digital_option_trade(
             asset, current_amount, direction, expiry=expiry
         )
@@ -107,12 +105,10 @@ async def process_signals(api, raw_text: str):
         logger.info("No valid signals found.")
         return
 
-    # Group signals by scheduled time
     grouped = defaultdict(list)
     for sig in signals:
         grouped[sig["time"]].append(sig)
 
-    # Process groups in chronological order
     for sched_time in sorted(grouped.keys()):
         now = datetime.now()
         delay = (sched_time - now).total_seconds()
@@ -129,7 +125,6 @@ async def process_signals(api, raw_text: str):
         for sig in grouped[sched_time]:
             logger.info(f"📊 Signal: {sig['line']}")
 
-        # Fire all trades immediately in parallel
         await asyncio.gather(
             *(
                 asyncio.to_thread(
@@ -138,22 +133,3 @@ async def process_signals(api, raw_text: str):
                 for sig in grouped[sched_time]
             )
         )
-
-
-async def main():
-    print("\n📡 Initializing API and Establishing Connection")
-    api = IQOptionAPI()
-    api._connect()
-    logger.info("Connected ✅")
-    logger.info(f"Starting balance: ${api.get_current_account_balance()}")
-
-    # Load signals from file by default (can be replaced with Telegram input later)
-    raw_signals = load_signals("signals.txt")
-    await process_signals(api, raw_signals)
-
-    logger.info("\n✅ All signals processed.")
-    logger.info(f"Final balance: ${api.get_current_account_balance()}")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

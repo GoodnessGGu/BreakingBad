@@ -36,9 +36,18 @@ class IQOptionAPI:
             password (str, optional): Login password. Defaults to settings.PASSWORD
             account_type (str, optional): Account type. Defaults to settings.DEFAULT_ACCOUNT_TYPE
         """
-        self.email = email or EMAIL
-        self.password = password or PASSWORD
-        self.account_mode = account_type or DEFAULT_ACCOUNT_TYPE
+        # Prefer args → else environment → else crash
+        self.email = email or os.getenv("IQ_EMAIL")
+        self.password = password or os.getenv("IQ_PASSWORD")
+        self.account_mode = account_type or os.getenv("IQ_ACCOUNT_TYPE", "practice")
+
+        # Validate required credentials
+        if not self.email or not self.password:
+            logger.error("❌ Email and password are required! Check environment variables IQ_EMAIL and IQ_PASSWORD.")
+            sys.exit(1)
+        # self.email = email or EMAIL
+        # self.password = password or PASSWORD
+        # self.account_mode = account_type or DEFAULT_ACCOUNT_TYPE
 
         # Initialize HTTP session for login requests
         self.session = requests.Session()
