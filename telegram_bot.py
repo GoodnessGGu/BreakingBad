@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 from iqclient import IQOptionAPI
-from utils.signal_parser import parse_signals, load_signals
+from signal_parser import parse_signals, load_signals
 from main import run_trade, PAUSED
 
 # Logging
