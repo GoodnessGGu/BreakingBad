@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sys
 from iqclient import IQOptionAPI
-from utils.signal_parser import load_signals, parse_signals
+from signal_parser import load_signals, parse_signals
 from datetime import datetime
 from collections import defaultdict
 
