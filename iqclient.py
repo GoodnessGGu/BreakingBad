@@ -61,6 +61,14 @@ class IQOptionAPI:
         self.trade_manager = TradeManager(self.websocket, self.message_handler, self.account_manager)
         logger.info('ALGO BOT initialized successfully')
 
+    def check_connect(self):
+        """Check if the API session is still active."""
+        try:
+            return self.api is not None and self.api.check_connect()
+        except Exception:
+            return False
+
+
     def _login(self):
         """
         Authenticate with IQOption using email/password.
