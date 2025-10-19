@@ -1,113 +1,105 @@
 # signal_parser.py
 import re
 import logging
-from datetime import datetime, date
 
-# Set up logger
 logger = logging.getLogger(__name__)
 
-def clean_line(line: str) -> str:
+# --- Core Signal Parsing Logic ---
+def clean_signal_line(line: str) -> str:
     """
-    Clean up messy signal formats by:
-    - Replacing 'i' or ',' with ';'
-    - Fixing O or o to 0 in time
-    - Removing extra spaces
-    - Ensuring 4 components (time;asset;direction;expiry)
+    Cleans up a raw signal line by fixing common format issues:
+    - Converts letter 'O' or 'o' to zero '0' in time.
+    - Replaces 'i' or other invalid separators with ';'.
+    - Removes extra spaces.
+    - Normalizes structure like 00:15;EURUSD;CALL;5
     """
+    # Fix common typos and separators
     line = line.strip()
-    if not line:
-        return ""
+    line = line.replace("i", ";")
+    line = re.sub(r"[Oo](\d)", r"0\1", line)   # O1:05 -> 01:05
+    line = re.sub(r"[Oo]\s*:", "0:", line)     # O :05 -> 0:05
+    line = re.sub(r"\s+", "", line)            # remove stray spaces
 
-    # Replace common bad separators and lowercase letters
-    line = re.sub(r"[iI,|]", ";", line)
-    line = line.replace(" ", "")
-    line = line.replace("O", "0").replace("o", "0")
+    # Ensure we have semicolons in right places
+    if ";" not in line:
+        # Try to guess separator positions (time;pair;direction;amount)
+        parts = re.findall(r"(\d{1,2}:\d{2}|[A-Z]{6}|CALL|PUT|\d+)", line)
+        line = ";".join(parts)
 
-    # Fix malformed time like "f:" or "Of:" (replace f or F with 0)
-    line = re.sub(r"^[fF]", "0", line)
-    line = re.sub(r"([^\d])f:", r"\10:", line)
-
-    # Make sure it has semicolons as separators
-    parts = line.split(";")
-    if len(parts) < 4:
-        logger.debug(f"Skipping malformed line: {line}")
-        return ""
-
-    # Normalize fields
-    time_str = parts[0].strip()
-    asset = parts[1].upper().strip()
-    direction = parts[2].upper().strip()
-    expiry = parts[3].strip()
-
-    return f"{time_str};{asset};{direction};{expiry}"
+    return line
 
 
-def _parse_signals(text: str):
+def parse_signal(line: str):
     """
-    Core parser for signals like:
-    HH:MM;ASSET;CALL;5
-    (accepts messy versions with mixed separators)
+    Parses a single cleaned signal line into a dictionary.
+    Expected format: HH:MM;PAIR;DIRECTION;TIMEFRAME
+    Example: 03:40;EURAUD;CALL;5
+    """
+    try:
+        cleaned = clean_signal_line(line)
+        parts = cleaned.split(";")
+
+        if len(parts) < 4:
+            logger.warning(f"Skipping invalid signal format: {line}")
+            return None
+
+        time_str = parts[0].strip()
+        pair = parts[1].upper().replace("/", "")
+        direction = parts[2].upper()
+        expiry = int(re.sub(r"\D", "", parts[3]))  # Extract numeric part safely
+
+        # Validate structure
+        if not re.match(r"^\d{1,2}:\d{2}$", time_str):
+            logger.warning(f"Invalid time format: {time_str}")
+            return None
+
+        if direction not in ["CALL", "PUT"]:
+            logger.warning(f"Invalid direction: {direction}")
+            return None
+
+        return {
+            "time": time_str,
+            "pair": pair,
+            "direction": direction,
+            "expiry": expiry
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to parse line '{line}': {e}")
+        return None
+
+
+# --- Parse Signals from Text ---
+def parse_signals_from_text(text: str):
+    """
+    Parses multiple signals from a text string.
+    Returns a list of dictionaries.
     """
     signals = []
-    pattern = re.compile(r"(\d{2}:\d{2});([A-Z]+);(CALL|PUT);(\d+)", re.IGNORECASE)
+    lines = text.strip().splitlines()
 
-    for raw_line in text.splitlines():
-        line = clean_line(raw_line)
-        if not line:
-            continue
+    for line in lines:
+        sig = parse_signal(line)
+        if sig:
+            signals.append(sig)
 
-        match = pattern.match(line)
-        if not match:
-            logger.debug(f"Skipping invalid line after cleanup: {raw_line}")
-            continue
-
-        time_str, asset, direction, expiry = match.groups()
-        try:
-            hh, mm = map(int, time_str.split(":"))
-        except ValueError:
-            logger.debug(f"Invalid time in line: {line}")
-            continue
-
-        scheduled_dt = datetime.combine(date.today(), datetime.min.time()).replace(
-            hour=hh, minute=mm, second=0
-        )
-
-        signal = {
-            "time": scheduled_dt,
-            "asset": asset,
-            "direction": direction.lower(),
-            "expiry": int(expiry),
-            "line": line
-        }
-        signals.append(signal)
-
-    logger.info(f"✅ Parsed {len(signals)} valid signals.")
+    logger.info(f"✅ Parsed {len(signals)} signals from text input.")
     return signals
 
 
-def parse_signals_from_text(text: str):
+# --- Parse Signals from File ---
+def parse_signals_from_file(filepath: str):
     """
-    Parse signals from raw text input (e.g., from Telegram command).
+    Reads a signal file (usually .txt) and parses all valid signals.
     """
-    if not text.strip():
-        logger.warning("⚠️ Empty signal text received.")
-        return []
-    return _parse_signals(text)
-
-
-def parse_signals_from_file(file_path: str):
-    """
-    Parse signals from a file uploaded via Telegram or local source.
-    """
+    signals = []
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-            if not content:
-                logger.warning(f"⚠️ File {file_path} is empty.")
-                return []
-            return _parse_signals(content)
-    except FileNotFoundError:
-        logger.error(f"❌ Signal file not found: {file_path}")
+        with open(filepath, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        for line in lines:
+            sig = parse_signal(line)
+            if sig:
+                signals.append(sig)
+        logger.info(f"✅ Parsed {len(signals)} signals from {filepath}.")
     except Exception as e:
-        logger.error(f"❌ Error reading {file_path}: {e}")
-    return []
+        logger.error(f"❌ Failed to parse signal file: {e}")
+    return signals
