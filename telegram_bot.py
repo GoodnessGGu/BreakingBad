@@ -1,3 +1,4 @@
+# telegram_bot.py
 import os
 import asyncio
 import logging
@@ -26,7 +27,7 @@ ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID")
 api = IQOptionAPI(email=EMAIL, password=PASSWORD)
 api._connect()
 
-# --- Utility: Ensure IQ Option Connection ---
+# --- Ensure IQ Option connection ---
 def ensure_connection():
     try:
         if not getattr(api, "_connected", False):
@@ -36,7 +37,7 @@ def ensure_connection():
     except Exception as e:
         logger.error(f"Failed to reconnect IQ Option API: {e}")
 
-# --- Telegram Command Handlers ---
+# --- Command Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) != str(ADMIN_ID):
         await update.message.reply_text("⛔ Unauthorized access.")
@@ -48,7 +49,10 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         bal = api.get_current_account_balance()
         acc_type = getattr(api, "account_mode", "unknown").capitalize()
-        await update.message.reply_text(f"💼 *{acc_type}* Account\n💰 Balance: *${bal:.2f}*", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"💼 *{acc_type}* Account\n💰 Balance: *${bal:.2f}*",
+            parse_mode="Markdown"
+        )
     except Exception as e:
         await update.message.reply_text(f"⚠️ Could not fetch balance: {e}")
 
@@ -64,20 +68,25 @@ async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("⚠️ Usage: /signals <PAIRS> <DIRECTION> <TIME>")
         return
+
     text = " ".join(context.args)
     signals = parse_signals_from_text(text)
+
     if not signals:
         await update.message.reply_text("⚠️ Could not parse any valid signals.")
         return
+
     for sig in signals:
         logger.info(f"📊 Parsed signal: {sig}")
         asyncio.create_task(api.execute_signal(sig))
+
     await update.message.reply_text("📨 Signals received and executing...")
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
     if not document:
         return
+
     file = await document.get_file()
     file_path = f"/tmp/{document.file_name}"
     await file.download_to_drive(file_path)
@@ -86,54 +95,58 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not signals:
         await update.message.reply_text("⚠️ No valid signals found in file.")
         return
+
     for sig in signals:
         logger.info(f"📊 Parsed signal from file: {sig}")
         asyncio.create_task(api.execute_signal(sig))
+
     await update.message.reply_text("📂 File signals received and executing...")
 
-# --- Startup Notification ---
+# --- Admin Startup Notification ---
 async def notify_admin_startup(app):
     """
-    Notify admin when bot successfully starts and IQ Option API is connected.
+    Notify admin when bot starts successfully and API connection is ready.
     """
     try:
-        if ADMIN_ID:
-            if not getattr(api, "_connected", False):
-                logger.info("🔁 Reconnecting IQ Option API before notifying admin...")
-                api._connect()
-
-            balance = api.get_current_account_balance()
-            account_type = getattr(api, "account_mode", "unknown").capitalize()
-
-            # Fetch open positions if available
-            open_trades = []
-            try:
-                positions = api.get_open_positions()
-                if positions:
-                    for p in positions:
-                        open_trades.append(f"{p['asset']} ({p['direction']}) @ {p['amount']}$")
-            except Exception as e:
-                logger.warning(f"Could not fetch open positions: {e}")
-
-            trades_text = "\n".join(open_trades) if open_trades else "No open trades."
-
-            message = (
-                f"🤖 *Trading Bot Online*\n"
-                f"📧 Account: `{EMAIL}`\n"
-                f"💼 Account Type: *{account_type}*\n"
-                f"💰 Balance: *${balance:.2f}*\n\n"
-                f"📊 *Open Trades:*\n{trades_text}\n\n"
-                f"✅ Ready to receive signals!"
-            )
-
-            await app.bot.send_message(chat_id=int(ADMIN_ID), text=message, parse_mode="Markdown")
-            logger.info("✅ Startup notification sent to admin.")
-        else:
+        if not ADMIN_ID:
             logger.warning("⚠️ TELEGRAM_ADMIN_ID not set. Skipping startup notification.")
+            return
+
+        # Reconnect IQ Option if necessary
+        if not getattr(api, "_connected", False):
+            logger.info("🔁 Reconnecting IQ Option API before notifying admin...")
+            api._connect()
+
+        balance = api.get_current_account_balance()
+        account_type = getattr(api, "account_mode", "unknown").capitalize()
+
+        open_trades = []
+        try:
+            positions = api.get_open_positions()
+            if positions:
+                for p in positions:
+                    open_trades.append(f"{p['asset']} ({p['direction']}) @ {p['amount']}$")
+        except Exception as e:
+            logger.warning(f"Could not fetch open positions: {e}")
+
+        trades_text = "\n".join(open_trades) if open_trades else "No open trades."
+
+        message = (
+            f"🤖 *Trading Bot Online*\n"
+            f"📧 Account: `{EMAIL}`\n"
+            f"💼 Account Type: *{account_type}*\n"
+            f"💰 Balance: *${balance:.2f}*\n\n"
+            f"📊 *Open Trades:*\n{trades_text}\n\n"
+            f"✅ Ready to receive signals!"
+        )
+
+        await app.bot.send_message(chat_id=int(ADMIN_ID), text=message, parse_mode="Markdown")
+        logger.info("✅ Startup notification sent to admin.")
+
     except Exception as e:
         logger.error(f"❌ Failed to send startup notification: {e}")
 
-# --- Main entrypoint ---
+# --- Main Entrypoint ---
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
@@ -145,12 +158,12 @@ def main():
 
     logger.info("🌐 Running bot on Render using polling mode.")
 
-    async def run():
-        # Notify admin once bot is ready
-        asyncio.create_task(notify_admin_startup(app))
-        await app.run_polling()
+    # ✅ Corrected lifecycle (no asyncio.run())
+    async def on_startup(app):
+        await notify_admin_startup(app)
 
-    asyncio.run(run())
+    app.post_init = on_startup
+    app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
     main()
