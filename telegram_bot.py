@@ -66,12 +66,13 @@ async def refill(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ Usage: /signals <PAIRS> <DIRECTION> <TIME>")
+        await update.message.reply_text(
+            "⚠️ Usage: /signals followed by text or attach a file with signals."
+        )
         return
 
     text = " ".join(context.args)
     signals = parse_signals_from_text(text)
-
     if not signals:
         await update.message.reply_text("⚠️ Could not parse any valid signals.")
         return
@@ -105,44 +106,29 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Admin Startup Notification ---
 async def notify_admin_startup(app):
     """
-    Notify admin when bot starts successfully and API connection is ready.
+    Sends startup message with balance and account info to admin.
     """
     try:
         if not ADMIN_ID:
             logger.warning("⚠️ TELEGRAM_ADMIN_ID not set. Skipping startup notification.")
             return
 
-        # Reconnect IQ Option if necessary
+        # Reconnect if needed
         if not getattr(api, "_connected", False):
-            logger.info("🔁 Reconnecting IQ Option API before notifying admin...")
             api._connect()
 
         balance = api.get_current_account_balance()
-        account_type = getattr(api, "account_mode", "unknown").capitalize()
-
-        open_trades = []
-        try:
-            positions = api.get_open_positions()
-            if positions:
-                for p in positions:
-                    open_trades.append(f"{p['asset']} ({p['direction']}) @ {p['amount']}$")
-        except Exception as e:
-            logger.warning(f"Could not fetch open positions: {e}")
-
-        trades_text = "\n".join(open_trades) if open_trades else "No open trades."
+        acc_type = getattr(api, "account_mode", "unknown").capitalize()
 
         message = (
             f"🤖 *Trading Bot Online*\n"
             f"📧 Account: `{EMAIL}`\n"
-            f"💼 Account Type: *{account_type}*\n"
+            f"💼 Account Type: *{acc_type}*\n"
             f"💰 Balance: *${balance:.2f}*\n\n"
-            f"📊 *Open Trades:*\n{trades_text}\n\n"
             f"✅ Ready to receive signals!"
         )
-
         await app.bot.send_message(chat_id=int(ADMIN_ID), text=message, parse_mode="Markdown")
         logger.info("✅ Startup notification sent to admin.")
-
     except Exception as e:
         logger.error(f"❌ Failed to send startup notification: {e}")
 
@@ -150,20 +136,30 @@ async def notify_admin_startup(app):
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
+    # --- Command Handlers ---
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("refill", refill))
     app.add_handler(CommandHandler("signals", signals))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
-    logger.info("🌐 Running bot on Render using polling mode.")
+    logger.info("🌐 Starting bot in polling mode...")
 
-    # ✅ Corrected lifecycle (no asyncio.run())
     async def on_startup(app):
+        try:
+            # 🧹 Clean webhook (fixes 409 conflict)
+            await app.bot.delete_webhook()
+            logger.info("✅ Deleted any existing webhook before polling.")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not delete webhook: {e}")
         await notify_admin_startup(app)
 
-    app.post_init = on_startup
-    app.run_polling(close_loop=False)
+    # 🚀 Run polling safely
+    async def run_bot():
+        await on_startup(app)
+        await app.run_polling(close_loop=False)
+
+    asyncio.run(run_bot())
 
 if __name__ == "__main__":
     main()
