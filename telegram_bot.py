@@ -13,6 +13,7 @@ from telegram.ext import (
 from iqclient import IQOptionAPI, run_trade
 from signal_parser import parse_signals_from_text, parse_signals_from_file
 from settings import DEFAULT_TRADE_AMOUNT
+from keep_alive import keep_alive
 
 # --- Logging ---
 logging.basicConfig(
@@ -237,4 +238,5 @@ def main():
     app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
+    keep_alive()
     main()
