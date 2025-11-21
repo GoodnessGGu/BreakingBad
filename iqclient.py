@@ -3,6 +3,7 @@ import sys
 import time
 import logging
 import requests
+import asyncio
 from settings import *
 from typing import Optional, List
 
@@ -120,7 +121,7 @@ class IQOptionAPI:
         """
         return self.session.cookies.get('ssid')
 
-    def _connect(self):
+    async def _connect(self):
         """
         Establish full connection: login + websocket + authentication.
 
@@ -136,7 +137,7 @@ class IQOptionAPI:
 
             ## Wait for profile confirmation (indicates successful auth)
             while self.message_handler.profile_msg is None:
-                time.sleep(.1)
+                await asyncio.sleep(.1)
 
             # Set default account and mark as connected
             self.account_manager.set_default_account()
@@ -266,7 +267,7 @@ class IQOptionAPI:
         return self.account_manager.get_position_history_by_page(instrument_type, limit=limit, offset=offset)
 
     # Trade methods (digital kept as-is)
-    def execute_digital_option_trade(self, asset: str, amount: int, direction: str,
+    async def execute_digital_option_trade(self, asset: str, amount: int, direction: str,
                                     expiry: Optional[int] = 1):
         """
         Execute a digital options trade.
@@ -281,9 +282,9 @@ class IQOptionAPI:
             dict: Trade execution result with order ID
         """
         self._ensure_connected()
-        return self.trade_manager._execute_digital_option_trade(asset, amount, direction, expiry=expiry)
+        return await self.trade_manager._execute_digital_option_trade(asset, amount, direction, expiry=expiry)
 
-    def get_trade_outcome(self, order_id: int ,expiry:int):
+    async def get_trade_outcome(self, order_id: int ,expiry:int):
         """
         Get the outcome of a completed trade.
 
@@ -295,7 +296,7 @@ class IQOptionAPI:
             dict: Trade outcome (win/loss/refund) and payout details
         """
         self._ensure_connected()
-        return self.trade_manager.get_trade_outcome(order_id, expiry=expiry)
+        return await self.trade_manager.get_trade_outcome(order_id, expiry=expiry)
 
     # ---- New binary option wrappers ----
     def execute_binary_option_trade(self, asset: str, amount: int, direction: str,
@@ -328,3 +329,53 @@ class IQOptionAPI:
         """
         self._ensure_connected()
         return self.trade_manager.get_binary_trade_outcome(order_id, expiry=expiry)
+
+    async def get_open_positions(self):
+        """
+        Retrieve a list of all open positions.
+
+        Returns:
+            list: A list of dictionaries, each representing an open position.
+        """
+        self._ensure_connected()
+        open_positions = []
+        for position in self.message_handler.position_info.values():
+            if position.get("status") != "closed":
+                raw_event = position.get("raw_event", {})
+                open_positions.append({
+                    "asset": raw_event.get("instrument_underlying"),
+                    "direction": raw_event.get("instrument_dir"),
+                    "amount": raw_event.get("buy_amount"),
+                })
+        return open_positions
+
+
+from settings import PAUSED, MAX_MARTINGALE_GALES, MARTINGALE_MULTIPLIER
+
+async def run_trade(api, asset, direction, expiry, amount, max_gales=MAX_MARTINGALE_GALES):
+    """
+    Executes a trade (digital only) and handles up to a configurable number of martingale attempts.
+    """
+    if PAUSED:
+        logger.info(f"🚫 Trade skipped (bot paused): {asset} {direction.upper()}")
+        return
+
+    current_amount = amount
+    for gale in range(max_gales + 1):
+        success, order_id = await api.execute_digital_option_trade(asset, current_amount, direction, expiry=expiry)
+        if not success:
+            logger.error(f"❌ Failed to place trade on {asset}")
+            return
+
+        logger.info(f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} ({expiry}m expiry)")
+        pnl_ok, pnl = await api.get_trade_outcome(order_id, expiry=expiry)
+        balance = api.get_current_account_balance()
+
+        if pnl_ok and pnl > 0:
+            logger.info(f"✅ WIN on {asset} | Profit: ${pnl:.2f} | Balance: ${balance:.2f}")
+            return
+        else:
+            logger.warning(f"⚠️ LOSS on {asset} (Gale {gale}) | PnL: {pnl}")
+            current_amount *= MARTINGALE_MULTIPLIER
+
+    logger.error(f"💀 Lost all attempts ({max_gales} gales) on {asset}")

@@ -72,12 +72,22 @@ def parse_signal(line: str):
 def parse_signals_from_text(text: str):
     """
     Parses multiple signals from a text string.
-    Returns a list of dictionaries.
+    The text can contain multiple signals in one line.
     """
     signals = []
-    lines = text.strip().splitlines()
-
-    for line in lines:
+    # Split the text by what looks like a time pattern, but keep the delimiter
+    parts = re.split(r'(\d{1,2}:\d{2})', text)
+    
+    # The first part is usually empty or garbage, so skip it.
+    # Then, we have pairs of [time, rest_of_signal]
+    for i in range(1, len(parts), 2):
+        time_str = parts[i]
+        signal_body = parts[i+1]
+        
+        # Reconstruct the signal line
+        line = time_str + signal_body
+        
+        # Now parse the single line
         sig = parse_signal(line)
         if sig:
             signals.append(sig)

@@ -1,3 +1,4 @@
+import asyncio
 import time
 import logging
 from datetime import datetime, timezone
@@ -36,7 +37,7 @@ class TradeManager:
         raise KeyError(f'{asset_name} not found!')
 
     # ========== DIGITAL OPTIONS ==========
-    def _execute_digital_option_trade(self, asset:str, amount:float, direction:str, expiry:int=1):
+    async def _execute_digital_option_trade(self, asset:str, amount:float, direction:str, expiry:int=1):
         try:
             direction = direction.lower()
             self._validate_options_trading_parameters(asset, amount, direction, expiry)
@@ -50,14 +51,14 @@ class TradeManager:
             msg = self._build_options_body(asset, amount, expiry, direction_code)
             self.ws_manager.send_message("sendMessage", msg, request_id)
 
-            return self.wait_for_order_confirmation(request_id, expiry)
+            return await self.wait_for_order_confirmation(request_id, expiry)
             
         except (InvalidTradeParametersError, TradeExecutionError, KeyError) as e:
             logger.error(f"Trade execution failed: {e}")
         except Exception as e:
             logger.error(f"Unexpected error during trade execution: {e}", exc_info=True)
 
-    def wait_for_order_confirmation(self, request_id:int, expiry:int, timeout:int=10):
+    async def wait_for_order_confirmation(self, request_id:int, expiry:int, timeout:int=10):
         start_time = time.time()
         while time.time() - start_time < timeout:
             result = self.message_handler.open_positions['digital_options'].get(request_id)
@@ -69,7 +70,7 @@ class TradeManager:
                 else:
                     logger.error(f'Order Execution Failed, Reason: !!! {result} !!!')
                     return False, result
-            time.sleep(0.1)
+            await asyncio.sleep(0.1)
                 
         logger.error(f"Order Confirmation timed out after {timeout} seconds")
 
@@ -107,7 +108,7 @@ class TradeManager:
             raise TradeExecutionError("No active account available")
             
     # ========== TRADE OUTCOME ==========
-    def get_trade_outcome(self, order_id: int, expiry:int=1):
+    async def get_trade_outcome(self, order_id: int, expiry:int=1):
         start_time = time.time()
         timeout = get_remaining_secs(self.message_handler.server_time, expiry)
 
@@ -118,6 +119,6 @@ class TradeManager:
                 result_type = "WIN" if pnl > 0 else "LOSS"
                 logger.info(f"Trade closed - Order ID: {order_id}, Result: {result_type}, PnL: ${pnl:.2f}")
                 return True, pnl
-            time.sleep(.5)
+            await asyncio.sleep(.5)
 
         return False, None
