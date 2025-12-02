@@ -80,8 +80,7 @@ class IQOptionAPI:
 
         # Validate required credentials
         if not all([ self.email, self.password]):
-            print("Email and password are required!")
-            sys.exit()
+            raise ValueError("Email and password are required!")
 
         if self._connected:
             logger.warning('Already connected to iqoption')
@@ -128,7 +127,7 @@ class IQOptionAPI:
         Sets up the complete connection pipeline including websocket
         authentication and account initialization.
         """
-        if self._login():
+        if await asyncio.to_thread(self._login):
             # Start websocket connection
             self.websocket.start_websocket()
 
@@ -352,20 +351,34 @@ class IQOptionAPI:
 
 from settings import PAUSED, MAX_MARTINGALE_GALES, MARTINGALE_MULTIPLIER
 
-async def run_trade(api, asset, direction, expiry, amount, max_gales=MAX_MARTINGALE_GALES):
+async def run_trade(api, asset, direction, expiry, amount, max_gales=MAX_MARTINGALE_GALES, notification_callback=None):
     """
     Executes a trade (digital only) and handles up to a configurable number of martingale attempts.
     """
     if PAUSED:
         logger.info(f"🚫 Trade skipped (bot paused): {asset} {direction.upper()}")
-        return
+        return {
+            "asset": asset,
+            "direction": direction,
+            "expiry": expiry,
+            "result": "SKIPPED",
+            "gales": 0,
+            "profit": 0.0
+        }
 
     current_amount = amount
     for gale in range(max_gales + 1):
         success, order_id = await api.execute_digital_option_trade(asset, current_amount, direction, expiry=expiry)
         if not success:
             logger.error(f"❌ Failed to place trade on {asset}")
-            return
+            return {
+                "asset": asset,
+                "direction": direction,
+                "expiry": expiry,
+                "result": "ERROR",
+                "gales": gale,
+                "profit": 0.0
+            }
 
         logger.info(f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} ({expiry}m expiry)")
         pnl_ok, pnl = await api.get_trade_outcome(order_id, expiry=expiry)
@@ -373,9 +386,36 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=MAX_MARTING
 
         if pnl_ok and pnl > 0:
             logger.info(f"✅ WIN on {asset} | Profit: ${pnl:.2f} | Balance: ${balance:.2f}")
-            return
+            if notification_callback:
+                await notification_callback(f"✅ WIN on {asset} | Profit: ${pnl:.2f}")
+            return {
+                "asset": asset,
+                "direction": direction,
+                "expiry": expiry,
+                "result": "WIN",
+                "gales": gale,
+                "profit": pnl
+            }
         else:
             logger.warning(f"⚠️ LOSS on {asset} (Gale {gale}) | PnL: {pnl}")
-            current_amount *= MARTINGALE_MULTIPLIER
+            
+            if gale < max_gales:
+                next_amount = current_amount * MARTINGALE_MULTIPLIER
+                msg = f"⚠️ LOSS on {asset} (Gale {gale}). Martingale to Gale {gale+1}: ${next_amount:.2f}"
+                logger.info(msg)
+                if notification_callback:
+                    await notification_callback(msg)
+                current_amount = next_amount
+            else:
+                if notification_callback:
+                    await notification_callback(f"💀 LOSS on {asset} after {max_gales} gales.")
 
     logger.error(f"💀 Lost all attempts ({max_gales} gales) on {asset}")
+    return {
+        "asset": asset,
+        "direction": direction,
+        "expiry": expiry,
+        "result": "LOSS",
+        "gales": max_gales,
+        "profit": pnl if 'pnl' in locals() else 0.0
+    }

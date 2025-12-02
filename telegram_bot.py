@@ -3,6 +3,7 @@ import os
 import asyncio
 import logging
 import time
+import tempfile
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from telegram import Update
@@ -131,6 +132,7 @@ async def process_and_schedule_signals(update: Update, parsed_signals: list):
 
     await update.message.reply_text(f"✅ Found {len(parsed_signals)} signals. Scheduling trades...")
 
+    all_trade_tasks = []
     for sched_time in sorted(grouped.keys()):
         now = datetime.now()
         delay = (sched_time - now).total_seconds()
@@ -145,8 +147,43 @@ async def process_and_schedule_signals(update: Update, parsed_signals: list):
         logger.info(exec_msg)
         await update.message.reply_text(exec_msg)
 
+        async def notify(msg):
+            try:
+                await update.message.reply_text(msg)
+            except Exception as e:
+                logger.error(f"Failed to send notification: {e}")
+
         for s in grouped[sched_time]:
-            asyncio.create_task(run_trade(api, s["pair"], s["direction"], s["expiry"], DEFAULT_TRADE_AMOUNT))
+            task = asyncio.create_task(run_trade(api, s["pair"], s["direction"], s["expiry"], DEFAULT_TRADE_AMOUNT, notification_callback=notify))
+            all_trade_tasks.append(task)
+
+    # Wait for all trades to complete and generate report
+    if all_trade_tasks:
+        results = await asyncio.gather(*all_trade_tasks)
+        
+        report_lines = ["📊 *Trade Session Report*"]
+        total_profit = 0.0
+        wins = 0
+        losses = 0
+
+        for res in results:
+            if not res: continue # Handle potential None returns if any
+            
+            icon = "✅" if res['result'] == "WIN" else "❌" if res['result'] == "LOSS" else "⚠️"
+            line = f"{icon} {res['asset']} {res['direction']} | {res['result']} (Gale {res['gales']})"
+            report_lines.append(line)
+            
+            if res['result'] == "WIN":
+                wins += 1
+                total_profit += res['profit']
+            elif res['result'] == "LOSS":
+                losses += 1
+                total_profit += res['profit'] # profit is negative or 0 on loss
+
+        report_lines.append(f"\n🏆 Wins: {wins} | 💀 Losses: {losses}")
+        report_lines.append(f"💰 Total Profit: ${total_profit:.2f}")
+        
+        await update.message.reply_text("\n".join(report_lines), parse_mode="Markdown")
 
 async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -168,7 +205,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file = await document.get_file()
     # Use a temporary file path that is safe
-    file_path = os.path.join("/tmp", document.file_name)
+    file_path = os.path.join(tempfile.gettempdir(), document.file_name)
     await file.download_to_drive(file_path)
 
     parsed_signals = parse_signals_from_file(file_path)
