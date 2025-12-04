@@ -29,3 +29,7 @@ MARTINGALE_MULTIPLIER = 2
 
 # Global trading control flag
 PAUSED = False
+
+# Signal Suppression
+# If True, prevents a new trade if one is already active for the same asset & direction
+SUPPRESS_OVERLAPPING_SIGNALS = True

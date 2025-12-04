@@ -349,12 +349,29 @@ class IQOptionAPI:
         return open_positions
 
 
-from settings import PAUSED, MAX_MARTINGALE_GALES, MARTINGALE_MULTIPLIER
+from settings import PAUSED, MAX_MARTINGALE_GALES, MARTINGALE_MULTIPLIER, SUPPRESS_OVERLAPPING_SIGNALS
+
+# Global set to track active trades to prevent overlapping signals
+ACTIVE_TRADES = set()
 
 async def run_trade(api, asset, direction, expiry, amount, max_gales=MAX_MARTINGALE_GALES, notification_callback=None):
     """
     Executes a trade (digital only) and handles up to a configurable number of martingale attempts.
     """
+    # Check for suppression first
+    trade_key = (asset, direction)
+    if SUPPRESS_OVERLAPPING_SIGNALS and trade_key in ACTIVE_TRADES:
+        msg = f"🚫 Trade suppressed: {asset} {direction.upper()} is already active."
+        logger.warning(msg)
+        return {
+            "asset": asset,
+            "direction": direction,
+            "expiry": expiry,
+            "result": "SUPPRESSED",
+            "gales": 0,
+            "profit": 0.0
+        }
+
     if PAUSED:
         logger.info(f"🚫 Trade skipped (bot paused): {asset} {direction.upper()}")
         return {
@@ -366,56 +383,66 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=MAX_MARTING
             "profit": 0.0
         }
 
-    current_amount = amount
-    for gale in range(max_gales + 1):
-        success, order_id = await api.execute_digital_option_trade(asset, current_amount, direction, expiry=expiry)
-        if not success:
-            logger.error(f"❌ Failed to place trade on {asset}")
-            return {
-                "asset": asset,
-                "direction": direction,
-                "expiry": expiry,
-                "result": "ERROR",
-                "gales": gale,
-                "profit": 0.0
-            }
+    ACTIVE_TRADES.add(trade_key)
+    try:
+        current_amount = amount
+        total_pnl = 0.0  # Track total PnL across all attempts
 
-        logger.info(f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} ({expiry}m expiry)")
-        pnl_ok, pnl = await api.get_trade_outcome(order_id, expiry=expiry)
-        balance = api.get_current_account_balance()
+        for gale in range(max_gales + 1):
+            success, order_id = await api.execute_digital_option_trade(asset, current_amount, direction, expiry=expiry)
+            if not success:
+                logger.error(f"❌ Failed to place trade on {asset}")
+                return {
+                    "asset": asset,
+                    "direction": direction,
+                    "expiry": expiry,
+                    "result": "ERROR",
+                    "gales": gale,
+                    "profit": total_pnl
+                }
 
-        if pnl_ok and pnl > 0:
-            logger.info(f"✅ WIN on {asset} | Profit: ${pnl:.2f} | Balance: ${balance:.2f}")
-            if notification_callback:
-                await notification_callback(f"✅ WIN on {asset} | Profit: ${pnl:.2f}")
-            return {
-                "asset": asset,
-                "direction": direction,
-                "expiry": expiry,
-                "result": "WIN",
-                "gales": gale,
-                "profit": pnl
-            }
-        else:
-            logger.warning(f"⚠️ LOSS on {asset} (Gale {gale}) | PnL: {pnl}")
-            
-            if gale < max_gales:
-                next_amount = current_amount * MARTINGALE_MULTIPLIER
-                msg = f"⚠️ LOSS on {asset} (Gale {gale}). Martingale to Gale {gale+1}: ${next_amount:.2f}"
-                logger.info(msg)
+            logger.info(f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} ({expiry}m expiry)")
+            pnl_ok, pnl = await api.get_trade_outcome(order_id, expiry=expiry)
+            balance = api.get_current_account_balance()
+
+            # Accumulate PnL (pnl is negative on loss, positive on win)
+            if pnl is not None:
+                total_pnl += pnl
+
+            if pnl_ok and pnl > 0:
+                logger.info(f"✅ WIN on {asset} | Profit: ${pnl:.2f} | Net PnL: ${total_pnl:.2f} | Balance: ${balance:.2f}")
                 if notification_callback:
-                    await notification_callback(msg)
-                current_amount = next_amount
+                    await notification_callback(f"✅ WIN on {asset} | Net PnL: ${total_pnl:.2f}")
+                return {
+                    "asset": asset,
+                    "direction": direction,
+                    "expiry": expiry,
+                    "result": "WIN",
+                    "gales": gale,
+                    "profit": total_pnl
+                }
             else:
-                if notification_callback:
-                    await notification_callback(f"💀 LOSS on {asset} after {max_gales} gales.")
+                logger.warning(f"⚠️ LOSS on {asset} (Gale {gale}) | PnL: {pnl} | Net PnL: ${total_pnl:.2f}")
+                
+                if gale < max_gales:
+                    next_amount = current_amount * MARTINGALE_MULTIPLIER
+                    msg = f"⚠️ LOSS on {asset} (Gale {gale}). Martingale to Gale {gale+1}: ${next_amount:.2f}"
+                    logger.info(msg)
+                    if notification_callback:
+                        await notification_callback(msg)
+                    current_amount = next_amount
+                else:
+                    if notification_callback:
+                        await notification_callback(f"💀 LOSS on {asset} after {max_gales} gales. Net PnL: ${total_pnl:.2f}")
 
-    logger.error(f"💀 Lost all attempts ({max_gales} gales) on {asset}")
-    return {
-        "asset": asset,
-        "direction": direction,
-        "expiry": expiry,
-        "result": "LOSS",
-        "gales": max_gales,
-        "profit": pnl if 'pnl' in locals() else 0.0
-    }
+        logger.error(f"💀 Lost all attempts ({max_gales} gales) on {asset}")
+        return {
+            "asset": asset,
+            "direction": direction,
+            "expiry": expiry,
+            "result": "LOSS",
+            "gales": max_gales,
+            "profit": total_pnl
+        }
+    finally:
+        ACTIVE_TRADES.discard(trade_key)
