@@ -141,6 +141,8 @@ class IQOptionAPI:
             # Set default account and mark as connected
             self.account_manager.set_default_account()
             self._connected = True
+        else:
+            raise ConnectionError("Login failed. Check credentials.")
 
     # Expose manager methods for convenience
     def get_current_account_balance(self):
@@ -349,18 +351,22 @@ class IQOptionAPI:
         return open_positions
 
 
-from settings import PAUSED, MAX_MARTINGALE_GALES, MARTINGALE_MULTIPLIER, SUPPRESS_OVERLAPPING_SIGNALS
+from settings import config
 
 # Global set to track active trades to prevent overlapping signals
 ACTIVE_TRADES = set()
 
-async def run_trade(api, asset, direction, expiry, amount, max_gales=MAX_MARTINGALE_GALES, notification_callback=None):
+async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notification_callback=None):
     """
     Executes a trade (digital only) and handles up to a configurable number of martingale attempts.
     """
+    # Use config if max_gales is not explicitly provided
+    if max_gales is None:
+        max_gales = config.max_martingale_gales
+
     # Check for suppression first
     trade_key = (asset, direction)
-    if SUPPRESS_OVERLAPPING_SIGNALS and trade_key in ACTIVE_TRADES:
+    if config.suppress_overlapping_signals and trade_key in ACTIVE_TRADES:
         msg = f"🚫 Trade suppressed: {asset} {direction.upper()} is already active."
         logger.warning(msg)
         return {
@@ -372,7 +378,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=MAX_MARTING
             "profit": 0.0
         }
 
-    if PAUSED:
+    if config.paused:
         logger.info(f"🚫 Trade skipped (bot paused): {asset} {direction.upper()}")
         return {
             "asset": asset,
@@ -389,18 +395,21 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=MAX_MARTING
         total_pnl = 0.0  # Track total PnL across all attempts
 
         for gale in range(max_gales + 1):
-            success, order_id = await api.execute_digital_option_trade(asset, current_amount, direction, expiry=expiry)
+            success, result_data = await api.execute_digital_option_trade(asset, current_amount, direction, expiry=expiry)
             if not success:
-                logger.error(f"❌ Failed to place trade on {asset}")
+                error_msg = str(result_data)
+                logger.error(f"❌ Failed to place trade on {asset}: {error_msg}")
                 return {
                     "asset": asset,
                     "direction": direction,
                     "expiry": expiry,
                     "result": "ERROR",
+                    "error_message": error_msg,
                     "gales": gale,
                     "profit": total_pnl
                 }
 
+            order_id = result_data
             logger.info(f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} ({expiry}m expiry)")
             pnl_ok, pnl = await api.get_trade_outcome(order_id, expiry=expiry)
             balance = api.get_current_account_balance()
@@ -425,7 +434,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=MAX_MARTING
                 logger.warning(f"⚠️ LOSS on {asset} (Gale {gale}) | PnL: {pnl} | Net PnL: ${total_pnl:.2f}")
                 
                 if gale < max_gales:
-                    next_amount = current_amount * MARTINGALE_MULTIPLIER
+                    next_amount = current_amount * config.martingale_multiplier
                     msg = f"⚠️ LOSS on {asset} (Gale {gale}). Martingale to Gale {gale+1}: ${next_amount:.2f}"
                     logger.info(msg)
                     if notification_callback:

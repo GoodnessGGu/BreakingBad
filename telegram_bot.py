@@ -11,9 +11,10 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ContextTypes, filters
 )
+from telegram import ReplyKeyboardMarkup, KeyboardButton
 from iqclient import IQOptionAPI, run_trade
 from signal_parser import parse_signals_from_text, parse_signals_from_file
-from settings import DEFAULT_TRADE_AMOUNT
+from settings import config
 from keep_alive import keep_alive
 
 # --- Logging ---
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 EMAIL = os.getenv("IQ_EMAIL")
 PASSWORD = os.getenv("IQ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID")
+ADMIN_ID = os.getenv("ADMIN_ID")
 
 # --- Start Time (for uptime reporting) ---
 START_TIME = time.time()
@@ -38,21 +39,90 @@ api = IQOptionAPI(email=EMAIL, password=PASSWORD)
 # --- Ensure IQ Option connection ---
 async def ensure_connection():
     """Ensures the API is connected before executing a command."""
-    try:
-        if not getattr(api, "_connected", False):
-            logger.warning("🔌 IQ Option API disconnected — reconnecting...")
+    if getattr(api, "_connected", False):
+        return
+
+    logger.warning("🔌 IQ Option API disconnected — attempting to reconnect...")
+    
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
             await api._connect()
-            logger.info("🔁 Reconnected to IQ Option API.")
-    except Exception as e:
-        logger.error(f"Failed to reconnect IQ Option API: {e}")
-        raise  # Re-raise the exception to be caught by the command handler
+            if getattr(api, "_connected", False):
+                logger.info("🔁 Reconnected to IQ Option API.")
+                return
+        except Exception as e:
+            logger.warning(f"⚠️ Connection attempt {attempt}/{max_retries} failed: {e}")
+            if attempt < max_retries:
+                await asyncio.sleep(2)  # Wait before retrying
+    
+    # If we get here, all retries failed
+    raise ConnectionError("Failed to connect to IQ Option after multiple attempts. Check credentials.")
 
 # --- Command Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) != str(ADMIN_ID):
-        await update.message.reply_text("⛔ Unauthorized access.")
+        await update.message.reply_text(f"⛔ Unauthorized access. Your ID is: `{update.effective_chat.id}`", parse_mode="Markdown")
+        logger.warning(f"Unauthorized access attempt from ID: {update.effective_chat.id}")
         return
-    await update.message.reply_text("🤖 Bot is online and ready!")
+    
+    keyboard = [
+        [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
+        [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
+        [KeyboardButton("⚙️ Settings"), KeyboardButton("ℹ️ Help")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    await update.message.reply_text("🤖 Bot is online and ready!", reply_markup=reply_markup)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "ℹ️ *Bot Commands*\n\n"
+        "🖱 *Quick Actions:*\n"
+        "Use the keyboard buttons for common tasks.\n\n"
+        "🛠 *Configuration:*\n"
+        "`/set_amount <n>` - Set trade amount\n"
+        "`/set_account <type>` - REAL, DEMO, TOURNAMENT\n"
+        "`/set_martingale <n>` - Max martingale steps\n"
+        "`/suppress <on/off>` - Toggle signal suppression\n"
+        "`/pause` / `/resume` - Control trading\n\n"
+        "📡 *Signals:*\n"
+        "`/signals <text>` - Parse text signals\n"
+        "Or upload a text file with signals."
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def settings_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        f"⚙️ *Current Settings*\n"
+        f"💵 Amount: ${config.trade_amount}\n"
+        f"🔄 Max Gales: {config.max_martingale_gales}\n"
+        f"✖️ Martingale Multiplier: {config.martingale_multiplier}x\n"
+        f"💼 Account: {config.account_type}\n"
+        f"🚫 Suppression: {'ON' if config.suppress_overlapping_signals else 'OFF'}\n"
+        f"⏸️ Paused: {'YES' if config.paused else 'NO'}\n\n"
+        "To change these, use the /set commands (see ℹ️ Help)."
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    if text == "📊 Status":
+        await status(update, context)
+    elif text == "💰 Balance":
+        await balance(update, context)
+    elif text == "⏸ Pause":
+        await pause_bot(update, context)
+    elif text == "▶ Resume":
+        await resume_bot(update, context)
+    elif text == "⚙️ Settings":
+        await settings_info(update, context)
+    elif text == "ℹ️ Help":
+        await help_command(update, context)
+    else:
+        # Ignore other text or treat as signal input if you prefer
+        pass
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -99,11 +169,13 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         trades_info = "\n".join(open_trades) if open_trades else "No open trades."
 
         msg = (
-            f"📊 *Bot Status*\n\n"
             f"🔌 Connection: {'✅ Connected' if connected else '❌ Disconnected'}\n"
             f"💼 Account Type: *{acc_type}*\n"
             f"💰 Balance: *${bal:.2f}*\n"
             f"🕒 Uptime: {uptime_str}\n\n"
+            f"⚙️ *Settings:*\n"
+            f"💵 Amount: ${config.trade_amount} | 🔄 Gales: {config.max_martingale_gales}\n"
+            f"⏸️ Paused: {config.paused} | 🚫 Suppress: {config.suppress_overlapping_signals}\n\n"
             f"📈 *Open Trades:*{trades_info}"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
@@ -154,7 +226,7 @@ async def process_and_schedule_signals(update: Update, parsed_signals: list):
                 logger.error(f"Failed to send notification: {e}")
 
         for s in grouped[sched_time]:
-            task = asyncio.create_task(run_trade(api, s["pair"], s["direction"], s["expiry"], DEFAULT_TRADE_AMOUNT, notification_callback=notify))
+            task = asyncio.create_task(run_trade(api, s["pair"], s["direction"], s["expiry"], config.trade_amount, notification_callback=notify))
             all_trade_tasks.append(task)
 
     # Wait for all trades to complete and generate report
@@ -170,7 +242,12 @@ async def process_and_schedule_signals(update: Update, parsed_signals: list):
             if not res: continue # Handle potential None returns if any
             
             icon = "✅" if res['result'] == "WIN" else "❌" if res['result'] == "LOSS" else "⚠️"
-            line = f"{icon} {res['asset']} {res['direction']} | {res['result']} (Gale {res['gales']})"
+            
+            result_text = res['result']
+            if res['result'] == "ERROR" and 'error_message' in res:
+                result_text = f"ERROR: {res['error_message']}"
+                
+            line = f"{icon} {res['asset']} {res['direction']} | {result_text} (Gale {res['gales']})"
             report_lines.append(line)
             
             if res['result'] == "WIN":
@@ -213,6 +290,81 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Schedule and process signals
     asyncio.create_task(process_and_schedule_signals(update, parsed_signals))
 
+# --- Settings Commands ---
+async def set_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /set_amount <amount>")
+        return
+    try:
+        amount = float(context.args[0])
+        if amount < 1:
+            await update.message.reply_text("⚠️ Amount must be at least 1.")
+            return
+        config.trade_amount = amount
+        await update.message.reply_text(f"✅ Trade amount set to ${config.trade_amount}")
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid amount.")
+
+async def set_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /set_account <real/demo>")
+        return
+    target_type = context.args[0].upper()
+    valid_types = ['REAL', 'DEMO', 'TOURNAMENT']
+    
+    # Map common terms
+    if target_type == 'PRACTICE': target_type = 'DEMO'
+
+    if target_type not in valid_types:
+        await update.message.reply_text(f"⚠️ Invalid account type. Use: {', '.join(valid_types)}")
+        return
+
+    try:
+        await ensure_connection()
+        api.switch_account(target_type)
+        config.account_type = target_type # Update config to reflect change
+        await update.message.reply_text(f"✅ Switched to {target_type} account.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to switch account: {e}")
+
+async def set_martingale(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /set_martingale <count>")
+        return
+    try:
+        count = int(context.args[0])
+        if count < 0:
+            await update.message.reply_text("⚠️ Count must be non-negative.")
+            return
+        config.max_martingale_gales = count
+        await update.message.reply_text(f"✅ Max martingale gales set to {config.max_martingale_gales}")
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid number.")
+
+async def pause_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.paused = True
+    await update.message.reply_text("⏸️ Bot PAUSED. No new trades will be taken.")
+
+async def resume_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.paused = False
+    await update.message.reply_text("▶️ Bot RESUMED. Trading enabled.")
+
+async def toggle_suppression(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        status = "ON" if config.suppress_overlapping_signals else "OFF"
+        await update.message.reply_text(f"ℹ️ Signal suppression is currently {status}.\nUsage: /suppress <on/off>")
+        return
+    
+    mode = context.args[0].lower()
+    if mode in ['on', 'true', '1', 'yes']:
+        config.suppress_overlapping_signals = True
+        await update.message.reply_text("✅ Signal suppression enabled.")
+    elif mode in ['off', 'false', '0', 'no']:
+        config.suppress_overlapping_signals = False
+        await update.message.reply_text("✅ Signal suppression disabled.")
+    else:
+        await update.message.reply_text("⚠️ Invalid option. Use 'on' or 'off'.")
+
 # --- Startup Notification ---
 async def notify_admin_startup(app):
     """
@@ -245,11 +397,23 @@ def main():
 
     # Commands
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("refill", refill))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("signals", signals))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+    
+    # Text Handler for Keyboard
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Settings Commands
+    app.add_handler(CommandHandler("set_amount", set_amount))
+    app.add_handler(CommandHandler("set_account", set_account))
+    app.add_handler(CommandHandler("set_martingale", set_martingale))
+    app.add_handler(CommandHandler("pause", pause_bot))
+    app.add_handler(CommandHandler("resume", resume_bot))
+    app.add_handler(CommandHandler("suppress", toggle_suppression))
 
     logger.info("🌐 Initializing bot...")
 

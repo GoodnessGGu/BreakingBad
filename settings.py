@@ -22,14 +22,31 @@ ACCOUNT_DEMO = 4
 ACCOUNT_CFD = 6
 
 
+
 # Trade settings
 DEFAULT_TRADE_AMOUNT = 1
 MAX_MARTINGALE_GALES = 2
 MARTINGALE_MULTIPLIER = 2
 
-# Global trading control flag
+# Signal Suppression
+SUPPRESS_OVERLAPPING_SIGNALS = True
 PAUSED = False
 
-# Signal Suppression
-# If True, prevents a new trade if one is already active for the same asset & direction
-SUPPRESS_OVERLAPPING_SIGNALS = True
+class TradingConfig:
+    def __init__(self):
+        self.trade_amount = DEFAULT_TRADE_AMOUNT
+        self.max_martingale_gales = MAX_MARTINGALE_GALES
+        self.martingale_multiplier = MARTINGALE_MULTIPLIER
+        self.suppress_overlapping_signals = SUPPRESS_OVERLAPPING_SIGNALS
+        self.paused = PAUSED
+        self.account_type = DEFAULT_ACCOUNT_TYPE
+
+    def __str__(self):
+        return (f"TradingConfig(amount={self.trade_amount}, "
+                f"gales={self.max_martingale_gales}, "
+                f"multiplier={self.martingale_multiplier}, "
+                f"paused={self.paused}, "
+                f"suppress={self.suppress_overlapping_signals}, "
+                f"account={self.account_type})")
+
+config = TradingConfig()

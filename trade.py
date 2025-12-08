@@ -55,8 +55,10 @@ class TradeManager:
             
         except (InvalidTradeParametersError, TradeExecutionError, KeyError) as e:
             logger.error(f"Trade execution failed: {e}")
+            return False, str(e)
         except Exception as e:
             logger.error(f"Unexpected error during trade execution: {e}", exc_info=True)
+            return False, f"Unexpected error: {str(e)}"
 
     async def wait_for_order_confirmation(self, request_id:int, expiry:int, timeout:int=10):
         start_time = time.time()
@@ -73,6 +75,7 @@ class TradeManager:
             await asyncio.sleep(0.1)
                 
         logger.error(f"Order Confirmation timed out after {timeout} seconds")
+        return False, "Order confirmation timed out"
 
     def _build_options_body(self, asset: str, amount: float, expiry: int, direction: str) -> str:
         active_id = str(self.get_asset_id(asset))
