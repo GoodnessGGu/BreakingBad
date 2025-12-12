@@ -16,6 +16,11 @@ from iqclient import IQOptionAPI, run_trade
 from signal_parser import parse_signals_from_text, parse_signals_from_file
 from settings import config
 from keep_alive import keep_alive
+from channel_monitor import ChannelMonitor
+from trade_database import db
+from chart_generator import generate_pnl_chart, generate_winrate_chart, generate_asset_performance_chart, generate_summary_dashboard
+from trade_exporter import export_to_csv, export_to_excel
+from health_monitor import HealthMonitor
 
 # --- Logging ---
 logging.basicConfig(
@@ -30,11 +35,22 @@ PASSWORD = os.getenv("IQ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
+# Telegram API credentials for channel monitoring
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
+SIGNAL_CHANNEL_ID = os.getenv("SIGNAL_CHANNEL_ID")
+
 # --- Start Time (for uptime reporting) ---
 START_TIME = time.time()
 
 # --- Initialize IQ Option API (without connecting) ---
 api = IQOptionAPI(email=EMAIL, password=PASSWORD)
+
+# --- Initialize Channel Monitor (global instance) ---
+channel_monitor = None
+
+# --- Initialize Health Monitor (global instance) ---
+health_monitor_instance = None
 
 # --- Ensure IQ Option connection ---
 async def ensure_connection():
@@ -69,7 +85,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
         [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
-        [KeyboardButton("⚙️ Settings"), KeyboardButton("ℹ️ Help")]
+        [KeyboardButton("📡 Channels"), KeyboardButton("⚙️ Settings")],
+        [KeyboardButton("📈 Charts"), KeyboardButton("📋 History")],
+        [KeyboardButton("📊 Stats"), KeyboardButton("ℹ️ Help")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
@@ -88,7 +106,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/pause` / `/resume` - Control trading\n\n"
         "📡 *Signals:*\n"
         "`/signals <text>` - Parse text signals\n"
-        "Or upload a text file with signals."
+        "Or upload a text file with signals.\n\n"
+        "📢 *Channel Monitoring:*\n"
+        "`/channels` - Toggle channel signal monitoring\n\n"
+        "📊 *Analytics:*\n"
+        "`/stats [days]` - View trading statistics\n"
+        "`/history [days]` - View trade history\n"
+        "`/charts [days]` - Generate performance charts\n"
+        "`/export [days]` - Export trades to Excel\n\n"
+        "🔧 *System:*\n"
+        "`/health` - Check bot health status\n"
+        "`/shutdown` - Stop the bot remotely"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -116,8 +144,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await pause_bot(update, context)
     elif text == "▶ Resume":
         await resume_bot(update, context)
+    elif text == "📡 Channels":
+        await channels_command(update, context)
     elif text == "⚙️ Settings":
         await settings_info(update, context)
+    elif text == "📈 Charts":
+        await charts_command(update, context)
+    elif text == "📋 History":
+        await history_command(update, context)
+    elif text == "📊 Stats":
+        await stats_command(update, context)
     elif text == "ℹ️ Help":
         await help_command(update, context)
     else:
@@ -365,6 +401,271 @@ async def toggle_suppression(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await update.message.reply_text("⚠️ Invalid option. Use 'on' or 'off'.")
 
+async def channels_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle channel monitoring on/off."""
+    global channel_monitor
+    
+    # Check if credentials are configured
+    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+        await update.message.reply_text(
+            "❌ *Channel Monitoring Not Configured*\n\n"
+            "Please add the following to your .env file:\n"
+            "`TELEGRAM_API_ID`\n"
+            "`TELEGRAM_API_HASH`\n"
+            "`SIGNAL_CHANNEL_ID`\n\n"
+            "Get API credentials from: https://my.telegram.org/auth",
+            parse_mode="Markdown"
+        )
+        return
+    
+    if not SIGNAL_CHANNEL_ID:
+        await update.message.reply_text(
+            "❌ *No Channel Configured*\n\n"
+            "Please add `SIGNAL_CHANNEL_ID` to your .env file.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Create notification callback
+    async def notify(msg):
+        try:
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Failed to send notification: {e}")
+    
+    # Toggle monitoring
+    if channel_monitor is None or not channel_monitor.is_monitoring():
+        # Start monitoring
+        try:
+            await ensure_connection()
+            
+            channel_monitor = ChannelMonitor(
+                api_id=TELEGRAM_API_ID,
+                api_hash=TELEGRAM_API_HASH,
+                channel_id=SIGNAL_CHANNEL_ID,
+                iq_api=api,
+                notification_callback=notify
+            )
+            
+            await update.message.reply_text(
+                "📡 *Starting Channel Monitoring...*\n\n"
+                f"Channel ID: `{SIGNAL_CHANNEL_ID}`\n"
+                "Please wait...",
+                parse_mode="Markdown"
+            )
+            
+            # Start monitoring in background
+            asyncio.create_task(channel_monitor.start_monitoring())
+            
+        except Exception as e:
+            logger.error(f"Failed to start channel monitoring: {e}")
+            await update.message.reply_text(f"❌ Failed to start monitoring: {e}")
+    else:
+        # Stop monitoring
+        try:
+            await channel_monitor.stop_monitoring()
+            channel_monitor = None
+            await update.message.reply_text(
+                "📡 *Channel Monitoring Stopped*",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"Failed to stop channel monitoring: {e}")
+            await update.message.reply_text(f"❌ Failed to stop monitoring: {e}")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display trading statistics."""
+    try:
+        days = 7
+        if context.args and context.args[0].isdigit():
+            days = int(context.args[0])
+        
+        stats = db.get_statistics(days=days)
+        best_pairs = db.get_best_pairs(days=days, limit=3)
+        
+        if stats['total_trades'] == 0:
+            await update.message.reply_text(f"📊 No trades found in the last {days} days.")
+            return
+        
+        msg = f"📊 *Trading Statistics* ({days} days)\n\n"
+        msg += f"📈 Total Trades: {stats['total_trades']}\n"
+        msg += f"✅ Wins: {stats['wins']} | ❌ Losses: {stats['losses']}\n"
+        msg += f"🎯 Win Rate: {stats['win_rate']:.1f}%\n"
+        msg += f"💰 Total Profit: ${stats['total_profit']:.2f}\n"
+        msg += f"📊 Avg Profit/Trade: ${stats['avg_profit']:.2f}\n\n"
+        
+        if best_pairs:
+            msg += "*🏆 Top Performing Assets:*\n"
+            for pair in best_pairs:
+                msg += f"• {pair['asset']}: ${pair['total_profit']:.2f} ({pair['win_rate']:.0f}% WR)\n"
+        
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Failed to get statistics: {e}")
+        await update.message.reply_text(f"❌ Error getting statistics: {e}")
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display trade history."""
+    try:
+        days = 7
+        if context.args and context.args[0].isdigit():
+            days = int(context.args[0])
+        
+        trades = db.get_trades(days=days)
+        
+        if not trades:
+            await update.message.reply_text(f"📋 No trades found in the last {days} days.")
+            return
+        
+        msg = f"📋 *Trade History* (Last {min(10, len(trades))} of {len(trades)} trades)\n\n"
+        
+        for trade in trades[:10]:
+            icon = "✅" if trade['result'] == 'WIN' else "❌" if trade['result'] == 'LOSS' else "⚠️"
+            timestamp = trade['timestamp'][:16].replace('T', ' ')
+            msg += f"{icon} {timestamp}\n"
+            msg += f"   {trade['asset']} {trade['direction']} | ${trade['profit']:.2f} (G{trade['gale_level']})\n\n"
+        
+        if len(trades) > 10:
+            msg += f"_...and {len(trades) - 10} more trades_\n\n"
+        
+        msg += f"Use `/export {days}` to download full history"
+        
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Failed to get history: {e}")
+        await update.message.reply_text(f"❌ Error getting history: {e}")
+
+async def charts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate and send performance charts."""
+    try:
+        days = 7
+        if context.args and context.args[0].isdigit():
+            days = int(context.args[0])
+        
+        await update.message.reply_text(f"📈 Generating charts for last {days} days...")
+        
+        trades = db.get_trades(days=days)
+        stats = db.get_statistics(days=days)
+        best_pairs = db.get_best_pairs(days=days, limit=5)
+        
+        if not trades:
+            await update.message.reply_text(f"❌ No trades found in the last {days} days.")
+            return
+        
+        chart_path = generate_summary_dashboard(trades, stats, best_pairs)
+        
+        if chart_path and os.path.exists(chart_path):
+            with open(chart_path, 'rb') as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=f"📊 Performance Dashboard ({days} days)"
+                )
+            os.remove(chart_path)
+        else:
+            await update.message.reply_text("❌ Failed to generate chart")
+    except Exception as e:
+        logger.error(f"Failed to generate charts: {e}")
+        await update.message.reply_text(f"❌ Error generating charts: {e}")
+
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Export trade history to Excel."""
+    try:
+        days = 30
+        if context.args and context.args[0].isdigit():
+            days = int(context.args[0])
+        
+        await update.message.reply_text(f"📊 Exporting trades from last {days} days...")
+        
+        trades = db.get_trades(days=days)
+        stats = db.get_statistics(days=days)
+        best_pairs = db.get_best_pairs(days=days, limit=10)
+        
+        if not trades:
+            await update.message.reply_text(f"❌ No trades found in the last {days} days.")
+            return
+        
+        filepath = export_to_excel(trades, stats, best_pairs)
+        
+        if filepath and os.path.exists(filepath):
+            with open(filepath, 'rb') as doc:
+                await update.message.reply_document(
+                    document=doc,
+                    filename=os.path.basename(filepath),
+                    caption=f"📊 Trade Export ({len(trades)} trades, {days} days)"
+                )
+            os.remove(filepath)
+        else:
+            await update.message.reply_text("❌ Failed to export trades")
+    except Exception as e:
+        logger.error(f"Failed to export trades: {e}")
+        await update.message.reply_text(f"❌ Error exporting trades: {e}")
+
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check bot health status."""
+    global health_monitor_instance
+    
+    try:
+        if not health_monitor_instance:
+            await update.message.reply_text("⚠️ Health monitoring not initialized")
+            return
+        
+        health_status = await health_monitor_instance.check_health()
+        
+        msg = "🏥 *Health Check Report*\n\n"
+        
+        for check_name, check_data in health_status['checks'].items():
+            icon = "✅" if check_data['healthy'] else "❌"
+            name = check_name.replace('_', ' ').title()
+            msg += f"{icon} {name}: {check_data['message']}\n"
+        
+        overall_icon = "✅" if health_status['overall_healthy'] else "❌"
+        msg += f"\n{overall_icon} *Overall Status:* {'Healthy' if health_status['overall_healthy'] else 'Unhealthy'}"
+        
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Failed to check health: {e}")
+        await update.message.reply_text(f"❌ Error checking health: {e}")
+
+async def shutdown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shutdown the bot remotely."""
+    # Verify admin
+    if str(update.effective_chat.id) != str(ADMIN_ID):
+        await update.message.reply_text("⛔ Unauthorized. Only admin can shutdown the bot.")
+        logger.warning(f"Unauthorized shutdown attempt from ID: {update.effective_chat.id}")
+        return
+    
+    try:
+        await update.message.reply_text(
+            "🛑 *Shutting down bot...*\n\n"
+            "The bot will stop in 3 seconds.\n"
+            "To restart, run the bot script again.",
+            parse_mode="Markdown"
+        )
+        
+        logger.info("🛑 Shutdown command received from admin")
+        
+        # Give time for message to send
+        await asyncio.sleep(3)
+        
+        # Stop health monitor if running
+        global health_monitor_instance
+        if health_monitor_instance:
+            health_monitor_instance.stop()
+        
+        # Stop channel monitor if running
+        global channel_monitor
+        if channel_monitor and channel_monitor.is_monitoring():
+            await channel_monitor.stop_monitoring()
+        
+        # Stop the application
+        logger.info("👋 Bot shutting down gracefully")
+        import os
+        os._exit(0)
+        
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
+        await update.message.reply_text(f"❌ Error during shutdown: {e}")
+
 # --- Startup Notification ---
 async def notify_admin_startup(app):
     """
@@ -414,6 +715,15 @@ def main():
     app.add_handler(CommandHandler("pause", pause_bot))
     app.add_handler(CommandHandler("resume", resume_bot))
     app.add_handler(CommandHandler("suppress", toggle_suppression))
+    app.add_handler(CommandHandler("channels", channels_command))
+    
+    # Analytics Commands
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("charts", charts_command))
+    app.add_handler(CommandHandler("export", export_command))
+    app.add_handler(CommandHandler("health", health_command))
+    app.add_handler(CommandHandler("shutdown", shutdown_command))
 
     logger.info("🌐 Initializing bot...")
 
@@ -428,6 +738,12 @@ def main():
             logger.info("📡 Connecting to IQ Option API...")
             await api._connect()
             logger.info("✅ Connected to IQ Option API.")
+
+            # Initialize health monitor
+            global health_monitor_instance
+            health_monitor_instance = HealthMonitor(api, app)
+            asyncio.create_task(health_monitor_instance.monitor_loop())
+            logger.info("✅ Health monitoring started")
 
             # Notify admin that the bot is online
             await notify_admin_startup(app)

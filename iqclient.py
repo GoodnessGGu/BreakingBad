@@ -314,8 +314,7 @@ class IQOptionAPI:
         Returns:
             tuple: (success: bool, order_id_or_error)
         """
-        self._ensure_connected()
-        return self.trade_manager._execute_binary_option_trade(asset, amount, direction, expiry=expiry)
+        raise NotImplementedError("Binary options trading not supported via API")
 
     def get_binary_trade_outcome(self, order_id: int, expiry: int = 1):
         """
@@ -328,8 +327,8 @@ class IQOptionAPI:
         Returns:
             tuple: (success: bool, pnl: float or None)
         """
-        self._ensure_connected()
-        return self.trade_manager.get_binary_trade_outcome(order_id, expiry=expiry)
+        raise NotImplementedError("Binary options trading not supported via API")
+
 
     async def get_open_positions(self):
         """
@@ -360,6 +359,9 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
     """
     Executes a trade (digital only) and handles up to a configurable number of martingale attempts.
     """
+    from trade_database import db
+    from datetime import datetime
+    
     # Use config if max_gales is not explicitly provided
     if max_gales is None:
         max_gales = config.max_martingale_gales
@@ -390,6 +392,8 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
         }
 
     ACTIVE_TRADES.add(trade_key)
+    entry_time = datetime.now()
+    
     try:
         current_amount = amount
         total_pnl = 0.0  # Track total PnL across all attempts
@@ -399,6 +403,22 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
             if not success:
                 error_msg = str(result_data)
                 logger.error(f"❌ Failed to place trade on {asset}: {error_msg}")
+                
+                # Log error to database
+                db.save_trade({
+                    'timestamp': entry_time.isoformat(),
+                    'asset': asset,
+                    'direction': direction,
+                    'amount': amount,
+                    'expiry': expiry,
+                    'entry_time': entry_time.isoformat(),
+                    'result': 'ERROR',
+                    'profit': 0,
+                    'gale_level': gale,
+                    'signal_source': 'channel',
+                    'error_message': error_msg
+                })
+                
                 return {
                     "asset": asset,
                     "direction": direction,
@@ -413,6 +433,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
             logger.info(f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} ({expiry}m expiry)")
             pnl_ok, pnl = await api.get_trade_outcome(order_id, expiry=expiry)
             balance = api.get_current_account_balance()
+            exit_time = datetime.now()
 
             # Accumulate PnL (pnl is negative on loss, positive on win)
             if pnl is not None:
@@ -420,6 +441,22 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
 
             if pnl_ok and pnl > 0:
                 logger.info(f"✅ WIN on {asset} | Profit: ${pnl:.2f} | Net PnL: ${total_pnl:.2f} | Balance: ${balance:.2f}")
+                
+                # Log WIN to database
+                db.save_trade({
+                    'timestamp': entry_time.isoformat(),
+                    'asset': asset,
+                    'direction': direction,
+                    'amount': amount,
+                    'expiry': expiry,
+                    'entry_time': entry_time.isoformat(),
+                    'exit_time': exit_time.isoformat(),
+                    'result': 'WIN',
+                    'profit': total_pnl,
+                    'gale_level': gale,
+                    'signal_source': 'channel'
+                })
+                
                 if notification_callback:
                     await notification_callback(f"✅ WIN on {asset} | Net PnL: ${total_pnl:.2f}")
                 return {
@@ -444,6 +481,21 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                     if notification_callback:
                         await notification_callback(f"💀 LOSS on {asset} after {max_gales} gales. Net PnL: ${total_pnl:.2f}")
 
+        # Log final LOSS to database
+        db.save_trade({
+            'timestamp': entry_time.isoformat(),
+            'asset': asset,
+            'direction': direction,
+            'amount': amount,
+            'expiry': expiry,
+            'entry_time': entry_time.isoformat(),
+            'exit_time': datetime.now().isoformat(),
+            'result': 'LOSS',
+            'profit': total_pnl,
+            'gale_level': max_gales,
+            'signal_source': 'channel'
+        })
+        
         logger.error(f"💀 Lost all attempts ({max_gales} gales) on {asset}")
         return {
             "asset": asset,
@@ -455,3 +507,4 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
         }
     finally:
         ACTIVE_TRADES.discard(trade_key)
+

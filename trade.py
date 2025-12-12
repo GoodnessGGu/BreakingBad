@@ -91,10 +91,35 @@ class TradeManager:
                 "user_balance_id": int(self.account_manager.current_account_id),
                 "instrument_id": str(instrument_id),
                 "amount": str(amount),
-                "asset_id": int(active_id),
+                "asset_id": active_id,
                 "instrument_index": 0,
             }
         }
+    
+    async def get_trade_outcome(self, order_id: int, expiry:int=1):
+        """
+        Get the outcome of a digital options trade.
+        
+        Args:
+            order_id: Order ID from trade execution
+            expiry: Expiry time in minutes
+            
+        Returns:
+            tuple: (success: bool, pnl: float or None)
+        """
+        start_time = time.time()
+        timeout = get_remaining_secs(self.message_handler.server_time, expiry)
+
+        while time.time() - start_time < timeout + 3:
+            order_data = self.message_handler.position_info.get(order_id, {})
+            if order_data and order_data.get("status") == "closed":
+                pnl = order_data.get('pnl', 0)
+                result_type = "WIN" if pnl > 0 else "LOSS"
+                logger.info(f"Trade closed - Order ID: {order_id}, Result: {result_type}, PnL: ${pnl:.2f}")
+                return True, pnl
+            await asyncio.sleep(.5)
+
+        return False, None
     
     # ========== PARAM VALIDATION ==========
     def _validate_options_trading_parameters(self, asset: str, amount: float, direction: str, expiry: int) -> None:
@@ -125,3 +150,4 @@ class TradeManager:
             await asyncio.sleep(.5)
 
         return False, None
+

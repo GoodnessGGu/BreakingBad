@@ -6,3 +6,7 @@ venv/
 env/
 *.log
 .DS_Store
+
+# Telethon session files
+*.session
+*.session-journal
