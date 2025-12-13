@@ -2,6 +2,7 @@
 import re
 import logging
 from datetime import datetime, timedelta
+from timezone_utils import now, parse_time_12h, format_time
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ def parse_channel_signal(message_text: str):
     📈 Direction: BUY 🟩
     
     Returns a dictionary with:
-    - time: datetime object for scheduled execution
+    - time: datetime object for scheduled execution (timezone-aware)
     - pair: currency pair (e.g., "AUDJPY")
     - direction: "CALL" or "PUT"
     - expiry: expiration time in minutes
@@ -50,19 +51,8 @@ def parse_channel_signal(message_text: str):
         minute = int(entry_match.group(2))
         am_pm = entry_match.group(3).upper()
         
-        # Convert to 24-hour format
-        if am_pm == "PM" and hour != 12:
-            hour += 12
-        elif am_pm == "AM" and hour == 12:
-            hour = 0
-        
-        # Create datetime object for entry time
-        now = datetime.now()
-        entry_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        
-        # If the entry time is in the past, assume it's for tomorrow
-        if entry_time < now:
-            entry_time += timedelta(days=1)
+        # Parse time using timezone utilities
+        entry_time = parse_time_12h(hour, minute, am_pm)
         
         # Extract direction
         direction_match = re.search(r'Direction:\s*(BUY|SELL)', message_text, re.IGNORECASE)
@@ -82,7 +72,7 @@ def parse_channel_signal(message_text: str):
             "expiry": expiry
         }
         
-        logger.info(f"✅ Parsed channel signal: {pair} {direction} @ {entry_time.strftime('%H:%M')} ({expiry}m)")
+        logger.info(f"✅ Parsed channel signal: {pair} {direction} @ {format_time(entry_time, '%H:%M %Z')} ({expiry}m)")
         return signal
         
     except Exception as e:

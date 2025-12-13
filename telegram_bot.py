@@ -21,6 +21,7 @@ from trade_database import db
 from chart_generator import generate_pnl_chart, generate_winrate_chart, generate_asset_performance_chart, generate_summary_dashboard
 from trade_exporter import export_to_csv, export_to_excel
 from health_monitor import HealthMonitor
+from timezone_utils import get_timezone_name, now as tz_now
 
 # --- Logging ---
 logging.basicConfig(
@@ -116,6 +117,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/export [days]` - Export trades to Excel\n\n"
         "🔧 *System:*\n"
         "`/health` - Check bot health status\n"
+        "`/timezone [tz]` - View/set timezone\n"
         "`/shutdown` - Stop the bot remotely"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -208,7 +210,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔌 Connection: {'✅ Connected' if connected else '❌ Disconnected'}\n"
             f"💼 Account Type: *{acc_type}*\n"
             f"💰 Balance: *${bal:.2f}*\n"
-            f"🕒 Uptime: {uptime_str}\n\n"
+            f"🕒 Uptime: {uptime_str}\n"
+            f"🌍 Timezone: {get_timezone_name()}\n\n"
             f"⚙️ *Settings:*\n"
             f"💵 Amount: ${config.trade_amount} | 🔄 Gales: {config.max_martingale_gales}\n"
             f"⏸️ Paused: {config.paused} | 🚫 Suppress: {config.suppress_overlapping_signals}\n\n"
@@ -666,6 +669,50 @@ async def shutdown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error during shutdown: {e}")
         await update.message.reply_text(f"❌ Error during shutdown: {e}")
 
+async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View or set the bot's timezone."""
+    import pytz
+    
+    if not context.args:
+        # Show current timezone
+        current_tz = get_timezone_name()
+        current_time = tz_now()
+        
+        msg = (
+            f"🌍 *Current Timezone*\n\n"
+            f"Timezone: `{current_tz}`\n"
+            f"Current Time: {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
+            f"*Common Timezones:*\n"
+            f"• `UTC` - Coordinated Universal Time\n"
+            f"• `America/New_York` - US Eastern\n"
+            f"• `America/Sao_Paulo` - Brazil (UTC-3)\n"
+            f"• `Europe/London` - UK\n"
+            f"• `Asia/Tokyo` - Japan\n\n"
+            f"To change: `/timezone <timezone_name>`\n"
+            f"Note: Requires bot restart to take effect"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    else:
+        # Validate timezone
+        tz_name = context.args[0]
+        try:
+            pytz.timezone(tz_name)
+            
+            msg = (
+                f"✅ *Timezone Update*\n\n"
+                f"To set timezone to `{tz_name}`, update your `.env` file:\n\n"
+                f"`TIMEZONE={tz_name}`\n\n"
+                f"Then restart the bot with `/shutdown` and start again."
+            )
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        except pytz.exceptions.UnknownTimeZoneError:
+            await update.message.reply_text(
+                f"❌ Unknown timezone: `{tz_name}`\n\n"
+                f"Use a valid pytz timezone name.\n"
+                f"See: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
+                parse_mode="Markdown"
+            )
+
 # --- Startup Notification ---
 async def notify_admin_startup(app):
     """
@@ -724,6 +771,7 @@ def main():
     app.add_handler(CommandHandler("export", export_command))
     app.add_handler(CommandHandler("health", health_command))
     app.add_handler(CommandHandler("shutdown", shutdown_command))
+    app.add_handler(CommandHandler("timezone", timezone_command))
 
     logger.info("🌐 Initializing bot...")
 

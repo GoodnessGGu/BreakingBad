@@ -153,6 +153,8 @@ class ChannelMonitor:
     async def _execute_signal(self, signal):
         """Execute a trade based on the parsed signal."""
         try:
+            from timezone_utils import now
+            
             # Check if bot is paused
             if config.paused:
                 logger.info("⏸️ Bot is paused, skipping trade execution")
@@ -161,8 +163,8 @@ class ChannelMonitor:
                 return
             
             # Calculate delay until entry time
-            now = datetime.now()
-            delay = (signal['time'] - now).total_seconds()
+            current_time = now()
+            delay = (signal['time'] - current_time).total_seconds()
             
             if delay > 0:
                 logger.info(f"⏳ Waiting {int(delay)}s until {signal['time'].strftime('%H:%M')} to execute trade")

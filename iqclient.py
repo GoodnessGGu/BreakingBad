@@ -360,7 +360,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
     Executes a trade (digital only) and handles up to a configurable number of martingale attempts.
     """
     from trade_database import db
-    from datetime import datetime
+    from timezone_utils import now
     
     # Use config if max_gales is not explicitly provided
     if max_gales is None:
@@ -392,7 +392,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
         }
 
     ACTIVE_TRADES.add(trade_key)
-    entry_time = datetime.now()
+    entry_time = now()
     
     try:
         current_amount = amount
@@ -433,7 +433,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
             logger.info(f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} ({expiry}m expiry)")
             pnl_ok, pnl = await api.get_trade_outcome(order_id, expiry=expiry)
             balance = api.get_current_account_balance()
-            exit_time = datetime.now()
+            exit_time = now()
 
             # Accumulate PnL (pnl is negative on loss, positive on win)
             if pnl is not None:
@@ -489,7 +489,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
             'amount': amount,
             'expiry': expiry,
             'entry_time': entry_time.isoformat(),
-            'exit_time': datetime.now().isoformat(),
+            'exit_time': now().isoformat(),
             'result': 'LOSS',
             'profit': total_pnl,
             'gale_level': max_gales,
