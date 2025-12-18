@@ -17,6 +17,11 @@ class MessageHandler:
             'digital_options': {},
             'binary_options': {}
         }
+        # Optimization: Event-driven confirmation
+        import asyncio
+        self.pending_digital_orders = {} # {request_id: asyncio.Future}
+        self.binary_order_event = asyncio.Event() 
+        
         self.recent_binary_opens = []
         self.position_info = {}
 
@@ -78,10 +83,21 @@ class MessageHandler:
         self.hisory_positions = message['msg']['positions']
 
     def _handle_digital_option_placed(self, message):
+        req_id = message["request_id"]
+        
+        # 1. Update fallback storage
         if message["msg"].get("id") is not None:
-            self.open_positions['digital_options'][message["request_id"]] = message["msg"].get("id")
+            self.open_positions['digital_options'][req_id] = message["msg"].get("id")
         else:
-            self.open_positions['digital_options'][message["request_id"]] = message["msg"].get("message")
+            self.open_positions['digital_options'][req_id] = message["msg"].get("message")
+            
+        # 2. Trigger Event-Driven Future if waiting
+        if req_id in self.pending_digital_orders:
+            future = self.pending_digital_orders.pop(req_id)
+            if not future.done():
+                # Pass the result directly (either ID or error message)
+                result = message["msg"].get("id") or message["msg"].get("message")
+                future.set_result(result)
 
     def _handle_position_changed(self, message):
         try:
@@ -98,6 +114,9 @@ class MessageHandler:
             # Keep list small
             if len(self.recent_binary_opens) > 20:
                 self.recent_binary_opens.pop(0)
+            
+            # Trigger Event for anyone waiting
+            self.binary_order_event.set()
                 
             # Legacy/Debug logic (optional, keeping for safety if request_id ever appears)
             if "request_id" in message:
@@ -111,7 +130,7 @@ class MessageHandler:
     def _handle_binary_option_closed(self, message):
         try:
             msg = message["msg"]
-            logger.info(f"Binary Option Closed received: {msg}")
+            # logger.info(f"Binary Option Closed: {msg}")
             
             option_id = msg.get("id") or msg.get("option_id")
             if option_id:

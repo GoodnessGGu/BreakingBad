@@ -101,7 +101,7 @@ def parse_signals_from_text(text: str):
     # 1. Try format "🔔 NEW SIGNAL!" (Block format)
     # This format usually comes as one message per signal, or multiple blocks.
     block_pattern = re.compile(
-        r"Trade:\s*(?:.*?)?([A-Z0-9]{3}/[A-Z0-9]{3})\s*(?:.*?)?(\(OTC\))?.*?Timer:\s*(\d+)\s*minutes.*?Entry:\s*(\d{1,2}:\d{2})\s*(AM|PM)?.*?Direction:\s*(SELL|BUY)", 
+        r"Trade:\s*(?:.*\s+)?([A-Z]{3}/[A-Z]{3})\s*(?:.*?)?(\(OTC\))?.*?Timer:\s*(\d+)\s*minutes.*?Entry:\s*(\d{1,2}:\d{2})\s*(AM|PM)?.*?Direction:\s*(SELL|BUY)", 
         re.DOTALL | re.IGNORECASE
     )
     

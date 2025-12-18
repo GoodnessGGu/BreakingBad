@@ -16,6 +16,8 @@ from iqclient import IQOptionAPI, run_trade
 from signal_parser import parse_signals_from_text, parse_signals_from_file
 from settings import config, TIMEZONE_MANUAL
 from keep_alive import keep_alive
+from channel_monitor import ChannelMonitor
+import pytz
 
 # --- Logging ---
 logging.basicConfig(
@@ -29,12 +31,24 @@ EMAIL = os.getenv("IQ_EMAIL")
 PASSWORD = os.getenv("IQ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
+API_ID = os.getenv("TELEGRAM_API_ID")
+API_HASH = os.getenv("TELEGRAM_API_HASH")
+
+# Support multiple channels
+CHANNELS = {
+    "1": os.getenv("CHANNEL_ID_1"),
+    "2": os.getenv("CHANNEL_ID_2")
+}
+active_channel_key = "1" # Default to channel 1
 
 # --- Start Time (for uptime reporting) ---
 START_TIME = time.time()
 
 # --- Initialize IQ Option API (without connecting) ---
 api = IQOptionAPI(email=EMAIL, password=PASSWORD)
+monitor = None
+# Defer monitor init to async loop due to Telethon requirements
+
 
 # --- Ensure IQ Option connection ---
 async def ensure_connection():
@@ -70,9 +84,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
         [KeyboardButton("📡 Auto-Monitor"), KeyboardButton("🔄 Switch Channel")],
         [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
-        [KeyboardButton("📡 Channels"), KeyboardButton("⚙️ Settings")],
-        [KeyboardButton("📈 Charts"), KeyboardButton("📋 History")],
-        [KeyboardButton("📊 Stats"), KeyboardButton("ℹ️ Help")]
+        [KeyboardButton("⚙️ Settings"), KeyboardButton("ℹ️ Help")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
@@ -91,18 +103,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/pause` / `/resume` - Control trading\n\n"
         "📡 *Signals:*\n"
         "`/signals <text>` - Parse text signals\n"
-        "Or upload a text file with signals.\n\n"
-        "📢 *Channel Monitoring:*\n"
-        "`/channels` - Toggle channel signal monitoring\n\n"
-        "📊 *Analytics:*\n"
-        "`/stats [days]` - View trading statistics\n"
-        "`/history [days]` - View trade history\n"
-        "`/charts [days]` - Generate performance charts\n"
-        "`/export [days]` - Export trades to Excel\n\n"
-        "🔧 *System:*\n"
-        "`/health` - Check bot health status\n"
-        "`/timezone [tz]` - View/set timezone\n"
-        "`/shutdown` - Stop the bot remotely"
+        "Or upload a text file with signals."
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -130,14 +131,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await pause_bot(update, context)
     elif text == "▶ Resume":
         await resume_bot(update, context)
+    elif text == "📡 Auto-Monitor":
+        if not monitor:
+            await update.message.reply_text("❌ Auto-Monitor credentials (API_ID/HASH) not found in `.env`")
+        else:
+            mon_status = "ACTIVE" if monitor.is_running else "INACTIVE"
+            curr_chan = CHANNELS.get(active_channel_key, "Unknown")
+            await update.message.reply_text(f"📡 *Auto-Monitor Status*: {mon_status}\n🎧 Listening to: `{curr_chan}`", parse_mode="Markdown")
+            
+    elif text == "🔄 Switch Channel":
+        await switch_channel(update, context)
+        
     elif text == "⚙️ Settings":
         await settings_info(update, context)
-    elif text == "📈 Charts":
-        await charts_command(update, context)
-    elif text == "📋 History":
-        await history_command(update, context)
-    elif text == "📊 Stats":
-        await stats_command(update, context)
     elif text == "ℹ️ Help":
         await help_command(update, context)
     else:
@@ -192,21 +198,16 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔌 Connection: {'✅ Connected' if connected else '❌ Disconnected'}\n"
             f"📡 Auto-Monitor: {'✅ Running' if monitor and monitor.is_running else '❌ Off'}\n"
             f"💼 Account Type: *{acc_type}*\n"
-            f"💰 Balance: *${bal:.2f}*\n"
+            f"💰 Balance: *${bal:.2f}*\n\n"
             f"🕒 Uptime: {uptime_str}\n\n"
             f"⚙️ *Settings:*\n"
             f"💵 Amount: ${config.trade_amount} | 🔄 Gales: {config.max_martingale_gales}\n"
             f"⏸️ Paused: {config.paused} | 🚫 Suppress: {config.suppress_overlapping_signals}\n\n"
-            f"📈 Open Trades: {trades_info}"
+            f"📈 *Open Trades:*{trades_info}"
         )
-        # Disable markdown to prevent parse errors with asset names
-        await update.message.reply_text(msg)
+        await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Status command error: {e}")
-        try:
-            await update.message.reply_text(f"⚠️ Failed to fetch status: {e}")
-        except:
-            pass
+        await update.message.reply_text(f"⚠️ Failed to fetch status: {e}")
 
 async def process_and_schedule_signals(update: Update, parsed_signals: list):
     """Schedules and executes trades based on parsed signals."""
@@ -434,6 +435,23 @@ async def toggle_suppression(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await update.message.reply_text("⚠️ Invalid option. Use 'on' or 'off'.")
 
+async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gracefully shuts down the bot."""
+    if str(update.effective_chat.id) != str(ADMIN_ID):
+        return
+
+    await update.message.reply_text("🛑 Shutting down system... Bye!")
+    logger.info("🛑 Received shutdown command. Exiting...")
+    
+    if monitor and monitor.is_running:
+        monitor.stop()
+    
+    # Give time for reply to send
+    await asyncio.sleep(1)
+    
+    # Kill process
+    os._exit(0)
+
 # --- Startup Notification ---
 async def notify_admin_startup(app):
     """
@@ -486,26 +504,29 @@ def main():
     app.add_handler(CommandHandler("resume", resume_bot))
     app.add_handler(CommandHandler("resume", resume_bot))
     app.add_handler(CommandHandler("suppress", toggle_suppression))
+    app.add_handler(CommandHandler("shutdown", shutdown_bot))
 
     logger.info("🌐 Initializing bot...")
 
     async def post_init(app):
         """Function to run after initialization and before polling starts."""
+        global monitor
         try:
+             # Initialize auto-monitor here (inside loop)
+            if API_ID and API_HASH and not monitor:
+                 try:
+                     monitor = ChannelMonitor(API_ID, API_HASH, api)
+                 except Exception as e:
+                     logger.error(f"❌ Failed to init ChannelMonitor: {e}")
+
             # Initialize the bot and connect to IQ Option
-            # app.bot.initialize() # Removed: handled by Application
+            await app.bot.initialize()
             await app.bot.delete_webhook()
             logger.info("✅ Deleted old webhook before polling.")
 
             logger.info("📡 Connecting to IQ Option API...")
             await api._connect()
             logger.info("✅ Connected to IQ Option API.")
-
-            # Initialize health monitor
-            global health_monitor_instance
-            health_monitor_instance = HealthMonitor(api, app)
-            asyncio.create_task(health_monitor_instance.monitor_loop())
-            logger.info("✅ Health monitoring started")
 
             # Notify admin that the bot is online
             await notify_admin_startup(app)

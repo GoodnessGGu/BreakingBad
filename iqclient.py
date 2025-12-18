@@ -315,7 +315,7 @@ class IQOptionAPI:
             tuple: (success: bool, order_id_or_error)
         """
         self._ensure_connected()
-        return self.trade_manager._execute_binary_option_trade(asset, amount, direction, expiry=expiry)
+        return await self.trade_manager._execute_binary_option_trade(asset, amount, direction, expiry=expiry)
 
     async def get_binary_trade_outcome(self, order_id: int, expiry: int = 1):
         """
@@ -329,7 +329,7 @@ class IQOptionAPI:
             tuple: (success: bool, pnl: float or None)
         """
         self._ensure_connected()
-        return self.trade_manager.get_binary_trade_outcome(order_id, expiry=expiry)
+        return await self.trade_manager.get_binary_trade_outcome(order_id, expiry=expiry)
 
     async def get_open_positions(self):
         """
@@ -360,9 +360,6 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
     """
     Executes a trade (digital only) and handles up to a configurable number of martingale attempts.
     """
-    from trade_database import db
-    from timezone_utils import now
-    
     # Use config if max_gales is not explicitly provided
     if max_gales is None:
         max_gales = config.max_martingale_gales
@@ -393,32 +390,39 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
         }
 
     ACTIVE_TRADES.add(trade_key)
-    entry_time = now()
-    
     try:
         current_amount = amount
-        total_pnl = 0.0
-        active_mode = "digital" # Default to digital, but can switch to binary
+        total_pnl = 0.0  # Track total PnL across all attempts
+        
+        # Track which type worked to avoid retrying failed types (e.g. Digital on OTC)
+        # Track which type worked to avoid retrying failed types (e.g. Digital on OTC)
+        # Optimization: Start with configured preference (BINARY/DIGITAL/AUTO)
+        preferred_type = "binary" if config.preferred_trading_type == "BINARY" else "digital" 
 
         for gale in range(max_gales + 1):
+            trade_type = preferred_type
             success = False
             result_data = None
             
-            # 1. OPTION A: DIGITAL
-            if active_mode == "digital":
+            # Attempt 1: Try Preferred Type
+            if trade_type == "digital":
                 success, result_data = await api.execute_digital_option_trade(asset, current_amount, direction, expiry=expiry)
-                
-                if not success:
-                    logger.warning(f"⚠️ Digital trade failed: {result_data}. Switching to Binary/Turbo mode for this and future gales...")
-                    active_mode = "binary" # PERMANENT SWITCH for this trade sequence
-
-            # 2. OPTION B: BINARY (Fallback or Primary if switched)
-            if active_mode == "binary":
+            else:
                 success, result_data = await api.execute_binary_option_trade(asset, current_amount, direction, expiry=expiry)
+            
+            # Fallback Logic: If Digital failed, try Binary
+            if not success and trade_type == "digital":
+                logger.warning(f"⚠️ Digital trade failed: {result_data}. Switching to Binary/Turbo option...")
+                trade_type = "binary"
+                success, result_data = await api.execute_binary_option_trade(asset, current_amount, direction, expiry=expiry)
+                
+                # If Binary worked, make it the preferred type for next gales
+                if success:
+                    preferred_type = "binary"
             
             if not success:
                 error_msg = str(result_data)
-                logger.error(f"❌ Failed to place trade on {asset}: {error_msg}")
+                logger.error(f"❌ Failed to place trade on {asset} (Digital & Binary): {error_msg}")
                 return {
                     "asset": asset,
                     "direction": direction,
@@ -430,16 +434,15 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                 }
 
             order_id = result_data
-            logger.info(f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} ({expiry}m expiry) [{active_mode.upper()}]")
+            logger.info(f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} ({expiry}m expiry)")
 
             pnl_ok, pnl = False, None
-            if active_mode == "digital":
+            if trade_type == "digital":
                  pnl_ok, pnl = await api.get_trade_outcome(order_id, expiry=expiry)
             else:
                  pnl_ok, pnl = await api.get_binary_trade_outcome(order_id, expiry=expiry)
 
             balance = api.get_current_account_balance()
-            exit_time = now()
 
             # Accumulate PnL (pnl is negative on loss, positive on win)
             if pnl is not None:
@@ -447,22 +450,6 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
 
             if pnl_ok and pnl > 0:
                 logger.info(f"✅ WIN on {asset} | Profit: ${pnl:.2f} | Net PnL: ${total_pnl:.2f} | Balance: ${balance:.2f}")
-                
-                # Log WIN to database
-                db.save_trade({
-                    'timestamp': entry_time.isoformat(),
-                    'asset': asset,
-                    'direction': direction,
-                    'amount': amount,
-                    'expiry': expiry,
-                    'entry_time': entry_time.isoformat(),
-                    'exit_time': exit_time.isoformat(),
-                    'result': 'WIN',
-                    'profit': total_pnl,
-                    'gale_level': gale,
-                    'signal_source': 'channel'
-                })
-                
                 if notification_callback:
                     await notification_callback(f"✅ WIN on {asset} | Net PnL: ${total_pnl:.2f}")
                 return {
@@ -487,21 +474,6 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                     if notification_callback:
                         await notification_callback(f"💀 LOSS on {asset} after {max_gales} gales. Net PnL: ${total_pnl:.2f}")
 
-        # Log final LOSS to database
-        db.save_trade({
-            'timestamp': entry_time.isoformat(),
-            'asset': asset,
-            'direction': direction,
-            'amount': amount,
-            'expiry': expiry,
-            'entry_time': entry_time.isoformat(),
-            'exit_time': now().isoformat(),
-            'result': 'LOSS',
-            'profit': total_pnl,
-            'gale_level': max_gales,
-            'signal_source': 'channel'
-        })
-        
         logger.error(f"💀 Lost all attempts ({max_gales} gales) on {asset}")
         return {
             "asset": asset,
@@ -513,4 +485,3 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
         }
     finally:
         ACTIVE_TRADES.discard(trade_key)
-

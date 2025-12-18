@@ -43,7 +43,11 @@ class TradingConfig:
         self.martingale_multiplier = MARTINGALE_MULTIPLIER
         self.suppress_overlapping_signals = SUPPRESS_OVERLAPPING_SIGNALS
         self.paused = PAUSED
+        self.suppress_overlapping_signals = SUPPRESS_OVERLAPPING_SIGNALS
+        self.paused = PAUSED
         self.account_type = DEFAULT_ACCOUNT_TYPE
+        # Optimization: AUTO, DIGITAL, BINARY
+        self.preferred_trading_type = os.getenv("PREFERRED_TRADING_TYPE", "AUTO").upper()
 
     def __str__(self):
         return (f"TradingConfig(amount={self.trade_amount}, "
