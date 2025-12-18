@@ -1,6 +1,20 @@
 # Telegram bot framework (with webhook support)
 python-telegram-bot[webhooks]==20.3
 
+# Telegram client for channel monitoring
+telethon==1.34.0
+
+# Analytics and data processing
+pandas==2.1.4
+matplotlib==3.8.2
+openpyxl==3.1.2
+
+# Process monitoring
+psutil==5.9.6
+
+# Timezone support
+pytz==2024.1
+
 # HTTP & API dependencies
 httpx==0.24.1
 requests==2.31.0
