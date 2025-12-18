@@ -1,251 +1,312 @@
 
-import os
 import asyncio
 import logging
 import pytz
 from datetime import datetime, timedelta
-from typing import Optional
 from telethon import TelegramClient, events
-
 from settings import config, TIMEZONE_AUTO
 from iqclient import run_trade
 from signal_parser import parse_signals_from_text
+
+logger = logging.getLogger(__name__)
+
+class ChannelMonitor:
+    def __init__(self, api_id, api_hash, api_instance):
+        self.api_id = api_id
+        self.api_hash = api_hash
+        self.api_instance = api_instance
+        self.client = None # Lazy load
+        self.is_running = False
+
+    async def start(self, channel_identifier):
+        """Starts the Telegram client and begins monitoring."""
+        if self.is_running:
+            return
+        
+        # Initialize client here, inside the loop
+        if not self.client:
+             self.client = TelegramClient('bot_session', self.api_id, self.api_hash)
+        
+        # specific handling for numeric IDs passed as strings
+        
+        # specific handling for numeric IDs passed as strings
+        try:
+            if channel_identifier.lstrip('-').isdigit():
+                channel_identifier = int(channel_identifier)
+        except ValueError:
+            pass # Keep as string if not int
+
+        try:
+            await self.client.start()
+            logger.info(f"📡 Monitor connected to Telegram (Listening: {channel_identifier})")
+            
+            @self.client.on(events.NewMessage(chats=channel_identifier))
+            async def handler(event):
+                await self._handle_new_message(event)
+
+            self.is_running = True
+            logger.info(f"✅ Auto-Monitor active for {channel_identifier} (TZ: {TIMEZONE_AUTO})")
+            await self.client.run_until_disconnected()
+        except Exception as e:
+            logger.error(f"❌ Monitor Error: {e}")
+            self.is_running = False
+
+    async def _handle_new_message(self, event):
+        text = event.message.text
+        if not text:
+            return
+
+        logger.info(f"📨 Auto-Signal Received: {text[:30]}...")
+        signals = parse_signals_from_text(text)
+        
+        if not signals:
+            return
+
+        tz = pytz.timezone(TIMEZONE_AUTO)
+        now_tz = datetime.now(tz)
+
+        for sig in signals:
+            try:
+                hh, mm = map(int, sig["time"].split(":"))
+                sched_time = now_tz.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                
+                # If time passed, assume next day
+                if sched_time < now_tz:
+                    sched_time += timedelta(days=1)
+
+                delay = (sched_time - now_tz).total_seconds()
+                
+                logger.info(f"⏳ Scheduled Auto-Trade: {sig['pair']} {sig['direction']} in {int(delay)}s")
+                
+                # Execute after delay
+                asyncio.create_task(self._delayed_trade(sig, delay))
+            except Exception as e:
+                logger.error(f"Error scheduling auto-trade: {e}")
+
+    async def _delayed_trade(self, sig, delay):
+        if delay > 0:
+            await asyncio.sleep(delay)
+        
+        logger.info(f"🚀 Executing Auto-Trade: {sig['pair']}")
+        await run_trade(
+            self.api_instance, 
+            sig['pair'], 
+            sig['direction'], 
+            sig['expiry'], 
+            config.trade_amount
+        )
+
+    def stop(self):
+        self.is_running = False
+        if self.client:
+            asyncio.create_task(self.client.disconnect())
+
+# channel_monitor.py
+import os
+import asyncio
+import logging
+from datetime import datetime
+from telethon import TelegramClient, events
 from channel_signal_parser import parse_channel_signal, is_signal_message
+from iqclient import run_trade
+from settings import config
 
 logger = logging.getLogger(__name__)
 
 
 class ChannelMonitor:
-    """Unified ChannelMonitor that supports multiple signal formats.
-
-    - Supports legacy `signal_parser.parse_signals_from_text` (returns list of signals
-      with time strings like 'HH:MM').
-    - Supports `channel_signal_parser.parse_channel_signal` (returns a dict
-      containing a `datetime`-typed `time`).
     """
-
-    def __init__(
-        self,
-        api_id: str,
-        api_hash: str,
-        api_instance=None,
-        channel_id: Optional[str] = None,
-        notification_callback=None,
-    ):
+    Monitors a Telegram channel for trading signals using Telethon.
+    """
+    
+    def __init__(self, api_id: str, api_hash: str, channel_id: str, iq_api, notification_callback=None):
+        """
+        Initialize the channel monitor.
+        
+        Args:
+            api_id: Telegram API ID
+            api_hash: Telegram API Hash
+            channel_id: Channel ID to monitor
+            iq_api: IQ Option API instance
+            notification_callback: Async function to send notifications to admin
+        """
         self.api_id = api_id
         self.api_hash = api_hash
-        self.api_instance = api_instance
-        self.channel_id = int(channel_id) if channel_id is not None else None
+        self.channel_id = int(channel_id) if channel_id else None
+        self.iq_api = iq_api
         self.notification_callback = notification_callback
-        self.client: Optional[TelegramClient] = None
+        self.client = None
         self.is_running = False
-
-    async def start(self, channel_identifier: Optional[str] = None):
-        """Start monitoring a channel. If `channel_identifier` is provided it overrides
-        the stored `channel_id`.
-        """
+        self._monitoring_task = None
+        
+    async def start_monitoring(self):
+        """Start monitoring the channel for signals."""
         if self.is_running:
             logger.warning("⚠️ Channel monitoring is already running")
             return
-
-        # Resolve channel id
-        if channel_identifier is None and self.channel_id is None:
-            logger.error("❌ No channel ID provided to start monitoring")
+        
+        if not self.channel_id:
+            logger.error("❌ No channel ID configured")
             return
-
-        if channel_identifier is not None:
-            try:
-                if isinstance(channel_identifier, str) and channel_identifier.lstrip('-').isdigit():
-                    channel_identifier = int(channel_identifier)
-            except Exception:
-                pass
-        else:
-            channel_identifier = self.channel_id
-
+        
         try:
-            if not self.client:
-                self.client = TelegramClient('bot_session', self.api_id, self.api_hash)
-
+            # Initialize Telethon client
+            self.client = TelegramClient(
+                'bot_session',
+                self.api_id,
+                self.api_hash
+            )
+            
             await self.client.start()
-            logger.info(f"✅ Telethon client started (listening: {channel_identifier})")
-
-            @self.client.on(events.NewMessage(chats=channel_identifier))
-            async def _on_message(event):
+            logger.info("✅ Telethon client started")
+            
+            # Register event handler for new messages
+            @self.client.on(events.NewMessage(chats=self.channel_id))
+            async def handle_new_message(event):
                 await self._process_message(event)
-
+            
             self.is_running = True
-            logger.info(f"📡 Started monitoring channel: {channel_identifier} (TZ: {TIMEZONE_AUTO})")
-
+            logger.info(f"📡 Started monitoring channel ID: {self.channel_id}")
+            
             if self.notification_callback:
                 await self.notification_callback(
-                    f"📡 *Channel Monitoring Started*\nMonitoring: `{channel_identifier}`"
+                    f"📡 *Channel Monitoring Started*\n"
+                    f"Monitoring channel ID: `{self.channel_id}`\n"
+                    f"Waiting for signals..."
                 )
-
+            
+            # Keep the client running
             await self.client.run_until_disconnected()
-
+            
         except Exception as e:
             logger.error(f"❌ Failed to start channel monitoring: {e}")
             self.is_running = False
             if self.notification_callback:
                 await self.notification_callback(f"❌ Failed to start monitoring: {e}")
-
-    async def stop(self):
+    
+    async def stop_monitoring(self):
         """Stop monitoring the channel."""
         if not self.is_running:
             logger.warning("⚠️ Channel monitoring is not running")
             return
-
+        
         try:
             self.is_running = False
+            
             if self.client:
                 await self.client.disconnect()
                 logger.info("✅ Telethon client disconnected")
-
+            
             logger.info("📡 Stopped monitoring channel")
+            
             if self.notification_callback:
                 await self.notification_callback("📡 *Channel Monitoring Stopped*")
-
+                
         except Exception as e:
             logger.error(f"❌ Failed to stop channel monitoring: {e}")
-
+    
     def is_monitoring(self) -> bool:
+        """Check if monitoring is currently active."""
         return self.is_running
-
+    
     async def _process_message(self, event):
-        """Process incoming Telethon message event and handle signals from
-        whichever parser matches the message format.
-        """
+        """Process a new message from the channel."""
         try:
-            # Prefer message text fields compatibly
-            message_text = None
-            if hasattr(event.message, 'message'):
-                message_text = event.message.message
-            elif hasattr(event.message, 'text'):
-                message_text = event.message.text
-            else:
-                # Fallback to string representation
-                message_text = str(event.message)
-
-            if not message_text:
+            message_text = event.message.message
+            
+            # Check if this is a signal message
+            if not is_signal_message(message_text):
+                logger.debug("Message is not a signal, ignoring")
                 return
-
-            logger.info(f"📨 Auto-Signal Received: {message_text[:80]}...")
-
-            # If message matches channel signal parser format, use that
-            if is_signal_message(message_text):
-                signal = parse_channel_signal(message_text)
-                if not signal:
-                    logger.warning("⚠️ Failed to parse channel signal")
-                    if self.notification_callback:
-                        await self.notification_callback(
-                            "⚠️ Signal detected but failed to parse channel format"
-                        )
-                    return
-
-                # Execute parsed signal (expects signal['time'] as datetime)
-                await self._execute_signal(signal)
+            
+            logger.info("🔔 Signal detected in channel!")
+            
+            # Parse the signal
+            signal = parse_channel_signal(message_text)
+            
+            if not signal:
+                logger.warning("⚠️ Failed to parse signal from message")
+                if self.notification_callback:
+                    await self.notification_callback(
+                        "⚠️ *Signal Detected but Failed to Parse*\n"
+                        f"Message: {message_text[:200]}..."
+                    )
                 return
-
-            # Otherwise try legacy parser which may return multiple signals
-            signals = parse_signals_from_text(message_text)
-            if not signals:
-                return
-
-            # For legacy signals (time as 'HH:MM'), schedule delayed trades
-            tz = pytz.timezone(TIMEZONE_AUTO)
-            now_tz = datetime.now(tz)
-
-            for sig in signals:
-                try:
-                    hh, mm = map(int, sig.get('time', '00:00').split(':'))
-                    sched_time = now_tz.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                    if sched_time < now_tz:
-                        sched_time += timedelta(days=1)
-                    delay = (sched_time - now_tz).total_seconds()
-                    logger.info(f"⏳ Scheduled Auto-Trade: {sig.get('pair')} {sig.get('direction')} in {int(delay)}s")
-                    asyncio.create_task(self._delayed_trade(sig, delay))
-                except Exception as e:
-                    logger.error(f"Error scheduling legacy auto-trade: {e}")
-
+            
+            # Notify admin about detected signal
+            if self.notification_callback:
+                entry_time_str = signal['time'].strftime('%I:%M %p')
+                await self.notification_callback(
+                    f"🔔 *New Signal Detected!*\n\n"
+                    f"📊 Pair: `{signal['pair']}`\n"
+                    f"📈 Direction: *{signal['direction']}*\n"
+                    f"⏰ Entry Time: {entry_time_str}\n"
+                    f"⏳ Expiry: {signal['expiry']} minutes\n\n"
+                    f"Trade will be executed automatically..."
+                )
+            
+            # Schedule and execute the trade
+            await self._execute_signal(signal)
+            
         except Exception as e:
             logger.error(f"❌ Error processing channel message: {e}")
             if self.notification_callback:
                 await self.notification_callback(f"❌ Error processing signal: {e}")
-
-    async def _delayed_trade(self, sig, delay: float):
-        if delay > 0:
-            await asyncio.sleep(delay)
-
-        pair = sig.get('pair')
-        direction = sig.get('direction')
-        expiry = sig.get('expiry')
-
-        logger.info(f"🚀 Executing Auto-Trade: {pair} {direction}")
-
-        # Build a simple notification wrapper
-        async def trade_notification(msg):
-            if self.notification_callback:
-                await self.notification_callback(msg)
-
-        # Try to pass a notification callback if run_trade supports it,
-        # otherwise fall back to basic call.
-        api = getattr(self, 'api_instance', None) or getattr(self, 'iq_api', None) or self.api_instance
-
-        try:
-            result = await run_trade(api, pair, direction, expiry, config.trade_amount, notification_callback=trade_notification)
-        except TypeError:
-            # run_trade doesn't accept notification_callback
-            result = await run_trade(api, pair, direction, expiry, config.trade_amount)
-
-        return result
-
+    
     async def _execute_signal(self, signal):
-        """Execute a parsed `signal` where `signal['time']` is a datetime."""
+        """Execute a trade based on the parsed signal."""
         try:
             from timezone_utils import now
-
+            
+            # Check if bot is paused
             if config.paused:
                 logger.info("⏸️ Bot is paused, skipping trade execution")
                 if self.notification_callback:
                     await self.notification_callback("⏸️ Trade skipped - Bot is paused")
                 return
-
+            
+            # Calculate delay until entry time
             current_time = now()
-            entry_time = signal['time']
-            delay = (entry_time - current_time).total_seconds()
-
+            delay = (signal['time'] - current_time).total_seconds()
+            
             if delay > 0:
-                logger.info(f"⏳ Waiting {int(delay)}s until {entry_time.strftime('%H:%M')} to execute trade")
+                logger.info(f"⏳ Waiting {int(delay)}s until {signal['time'].strftime('%H:%M')} to execute trade")
                 if self.notification_callback:
-                    await self.notification_callback(f"⏳ Waiting {int(delay)}s until {entry_time.strftime('%I:%M %p')} to enter trade...")
+                    await self.notification_callback(
+                        f"⏳ Waiting {int(delay)}s until {signal['time'].strftime('%I:%M %p')} to enter trade..."
+                    )
                 await asyncio.sleep(delay)
-
-            logger.info(f"🚀 Executing trade: {signal.get('pair')} {signal.get('direction')}")
-
+            
+            # Execute the trade
+            logger.info(f"🚀 Executing trade: {signal['pair']} {signal['direction']}")
+            
+            # Create notification callback for trade execution
             async def trade_notification(msg):
                 if self.notification_callback:
                     await self.notification_callback(msg)
-
-            api = getattr(self, 'api_instance', None) or getattr(self, 'iq_api', None) or self.api_instance
-
-            try:
-                result = await run_trade(api, signal['pair'], signal['direction'], signal['expiry'], config.trade_amount, notification_callback=trade_notification)
-            except TypeError:
-                result = await run_trade(api, signal['pair'], signal['direction'], signal['expiry'], config.trade_amount)
-
+            
+            # Run the trade with martingale
+            result = await run_trade(
+                self.iq_api,
+                signal['pair'],
+                signal['direction'],
+                signal['expiry'],
+                config.trade_amount,
+                notification_callback=trade_notification
+            )
+            
+            # Notify about trade entry
             if self.notification_callback:
                 entry_msg = (
                     f"✅ *Trade Entered!*\n\n"
-                    f"📊 Asset: `{signal.get('pair')}`\n"
-                    f"📈 Direction: *{signal.get('direction')}*\n"
+                    f"📊 Asset: `{signal['pair']}`\n"
+                    f"📈 Direction: *{signal['direction']}*\n"
                     f"💰 Amount: ${config.trade_amount}\n"
-                    f"⏳ Expiry: {signal.get('expiry')}m\n"
+                    f"⏳ Expiry: {signal['expiry']}m\n"
                     f"🕒 Entry Time: {datetime.now().strftime('%I:%M:%S %p')}"
                 )
                 await self.notification_callback(entry_msg)
-
-            return result
-
+            
         except Exception as e:
             logger.error(f"❌ Failed to execute signal: {e}")
             if self.notification_callback:
