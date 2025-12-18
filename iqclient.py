@@ -300,7 +300,7 @@ class IQOptionAPI:
         return await self.trade_manager.get_trade_outcome(order_id, expiry=expiry)
 
     # ---- New binary option wrappers ----
-    def execute_binary_option_trade(self, asset: str, amount: int, direction: str,
+    async def execute_binary_option_trade(self, asset: str, amount: int, direction: str,
                                     expiry: Optional[int] = 1):
         """
         Execute a binary options trade.
@@ -315,9 +315,9 @@ class IQOptionAPI:
             tuple: (success: bool, order_id_or_error)
         """
         self._ensure_connected()
-        return self.trade_manager._execute_binary_option_trade(asset, amount, direction, expiry=expiry)
+        return await self.trade_manager._execute_binary_option_trade(asset, amount, direction, expiry=expiry)
 
-    def get_binary_trade_outcome(self, order_id: int, expiry: int = 1):
+    async def get_binary_trade_outcome(self, order_id: int, expiry: int = 1):
         """
         Get the outcome of a binary options trade.
 
@@ -329,7 +329,7 @@ class IQOptionAPI:
             tuple: (success: bool, pnl: float or None)
         """
         self._ensure_connected()
-        return self.trade_manager.get_binary_trade_outcome(order_id, expiry=expiry)
+        return await self.trade_manager.get_binary_trade_outcome(order_id, expiry=expiry)
 
     async def get_open_positions(self):
         """
@@ -392,13 +392,28 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
     ACTIVE_TRADES.add(trade_key)
     try:
         current_amount = amount
-        total_pnl = 0.0  # Track total PnL across all attempts
+        total_pnl = 0.0
+        active_mode = "digital" # Default to digital, but can switch to binary
 
         for gale in range(max_gales + 1):
-            success, result_data = await api.execute_digital_option_trade(asset, current_amount, direction, expiry=expiry)
+            success = False
+            result_data = None
+            
+            # 1. OPTION A: DIGITAL
+            if active_mode == "digital":
+                success, result_data = await api.execute_digital_option_trade(asset, current_amount, direction, expiry=expiry)
+                
+                if not success:
+                    logger.warning(f"⚠️ Digital trade failed: {result_data}. Switching to Binary/Turbo mode for this and future gales...")
+                    active_mode = "binary" # PERMANENT SWITCH for this trade sequence
+
+            # 2. OPTION B: BINARY (Fallback or Primary if switched)
+            if active_mode == "binary":
+                success, result_data = await api.execute_binary_option_trade(asset, current_amount, direction, expiry=expiry)
+            
             if not success:
                 error_msg = str(result_data)
-                logger.error(f"❌ Failed to place trade on {asset}: {error_msg}")
+                logger.error(f"❌ Failed to place trade on {asset} ({active_mode.upper()}): {error_msg}")
                 return {
                     "asset": asset,
                     "direction": direction,
@@ -410,8 +425,14 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                 }
 
             order_id = result_data
-            logger.info(f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} ({expiry}m expiry)")
-            pnl_ok, pnl = await api.get_trade_outcome(order_id, expiry=expiry)
+            logger.info(f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} ({expiry}m expiry) [{active_mode.upper()}]")
+
+            pnl_ok, pnl = False, None
+            if active_mode == "digital":
+                 pnl_ok, pnl = await api.get_trade_outcome(order_id, expiry=expiry)
+            else:
+                 pnl_ok, pnl = await api.get_binary_trade_outcome(order_id, expiry=expiry)
+
             balance = api.get_current_account_balance()
 
             # Accumulate PnL (pnl is negative on loss, positive on win)

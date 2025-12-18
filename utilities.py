@@ -84,12 +84,31 @@ def get_expiration(timestamp:int, expiry:int=1):
         else:
             expiration = now_date_hm + timedelta(minutes=2)
     else:
-        time_until_expiry = (now_date_hm + timedelta(minutes=1)).timestamp() - timestamp
-
-        expiration = now_date_hm + timedelta(minutes=expiry)
-        
-        if time_until_expiry < min_time_needed:
-            expiration = now_date_hm + timedelta(minutes=expiry+1)
+        # Binary/Turbo logic
+        if expiry > 5:
+            # Round to next 15-minute interval for standard Binary options
+            # Example: 12:08 + 15m = 12:23 -> rounds to 12:30? 
+            # Or just round target time to nearest 15m?
+            # IQ Option usually offers: End of 15m candle.
+            
+            target_time = now_date_hm + timedelta(minutes=expiry)
+            minute = target_time.minute
+            
+            # Find next 15m slot (0, 15, 30, 45, 60)
+            remainder = minute % 15
+            if remainder != 0:
+                minutes_to_add = 15 - remainder
+                target_time += timedelta(minutes=minutes_to_add)
+            
+            expiration = target_time.replace(second=0, microsecond=0)
+        else:
+            # Turbo (exact minutes)
+            time_until_expiry = (now_date_hm + timedelta(minutes=1)).timestamp() - timestamp
+    
+            expiration = now_date_hm + timedelta(minutes=expiry)
+            
+            if time_until_expiry < min_time_needed:
+                expiration = now_date_hm + timedelta(minutes=expiry+1)
 
     # Return expiration time as timestamp in seconds
     return expiration.timestamp()

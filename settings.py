@@ -32,6 +32,10 @@ MARTINGALE_MULTIPLIER = 2
 SUPPRESS_OVERLAPPING_SIGNALS = True
 PAUSED = False
 
+# Timezones
+TIMEZONE_MANUAL = "America/Sao_Paulo"
+TIMEZONE_AUTO = "Africa/Lagos"
+
 class TradingConfig:
     def __init__(self):
         self.trade_amount = DEFAULT_TRADE_AMOUNT

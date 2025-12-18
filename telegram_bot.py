@@ -14,8 +14,10 @@ from telegram.ext import (
 from telegram import ReplyKeyboardMarkup, KeyboardButton
 from iqclient import IQOptionAPI, run_trade
 from signal_parser import parse_signals_from_text, parse_signals_from_file
-from settings import config
+from settings import config, TIMEZONE_MANUAL
 from keep_alive import keep_alive
+from channel_monitor import ChannelMonitor
+import pytz
 
 # --- Logging ---
 logging.basicConfig(
@@ -29,12 +31,24 @@ EMAIL = os.getenv("IQ_EMAIL")
 PASSWORD = os.getenv("IQ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
+API_ID = os.getenv("TELEGRAM_API_ID")
+API_HASH = os.getenv("TELEGRAM_API_HASH")
+
+# Support multiple channels
+CHANNELS = {
+    "1": os.getenv("CHANNEL_ID_1"),
+    "2": os.getenv("CHANNEL_ID_2")
+}
+active_channel_key = "1" # Default to channel 1
 
 # --- Start Time (for uptime reporting) ---
 START_TIME = time.time()
 
 # --- Initialize IQ Option API (without connecting) ---
 api = IQOptionAPI(email=EMAIL, password=PASSWORD)
+monitor = None
+if API_ID and API_HASH:
+    monitor = ChannelMonitor(API_ID, API_HASH, api)
 
 # --- Ensure IQ Option connection ---
 async def ensure_connection():
@@ -68,6 +82,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
+        [KeyboardButton("📡 Auto-Monitor"), KeyboardButton("🔄 Switch Channel")],
         [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
         [KeyboardButton("⚙️ Settings"), KeyboardButton("ℹ️ Help")]
     ]
@@ -116,6 +131,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await pause_bot(update, context)
     elif text == "▶ Resume":
         await resume_bot(update, context)
+    elif text == "📡 Auto-Monitor":
+        if not monitor:
+            await update.message.reply_text("❌ Auto-Monitor credentials (API_ID/HASH) not found in `.env`")
+        else:
+            mon_status = "ACTIVE" if monitor.is_running else "INACTIVE"
+            curr_chan = CHANNELS.get(active_channel_key, "Unknown")
+            await update.message.reply_text(f"📡 *Auto-Monitor Status*: {mon_status}\n🎧 Listening to: `{curr_chan}`", parse_mode="Markdown")
+            
+    elif text == "🔄 Switch Channel":
+        await switch_channel(update, context)
+        
     elif text == "⚙️ Settings":
         await settings_info(update, context)
     elif text == "ℹ️ Help":
@@ -170,17 +196,23 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         msg = (
             f"🔌 Connection: {'✅ Connected' if connected else '❌ Disconnected'}\n"
+            f"📡 Auto-Monitor: {'✅ Running' if monitor and monitor.is_running else '❌ Off'}\n"
             f"💼 Account Type: *{acc_type}*\n"
-            f"💰 Balance: *${bal:.2f}*\n"
+            f"💰 Balance: *${bal:.2f}*\n\n"
             f"🕒 Uptime: {uptime_str}\n\n"
             f"⚙️ *Settings:*\n"
             f"💵 Amount: ${config.trade_amount} | 🔄 Gales: {config.max_martingale_gales}\n"
             f"⏸️ Paused: {config.paused} | 🚫 Suppress: {config.suppress_overlapping_signals}\n\n"
-            f"📈 *Open Trades:*{trades_info}"
+            f"📈 Open Trades: {trades_info}"
         )
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        # Disable markdown to prevent parse errors with asset names
+        await update.message.reply_text(msg)
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Failed to fetch status: {e}")
+        logger.error(f"Status command error: {e}")
+        try:
+            await update.message.reply_text(f"⚠️ Failed to fetch status: {e}")
+        except:
+            pass
 
 async def process_and_schedule_signals(update: Update, parsed_signals: list):
     """Schedules and executes trades based on parsed signals."""
@@ -188,26 +220,38 @@ async def process_and_schedule_signals(update: Update, parsed_signals: list):
         await update.message.reply_text("⚠️ No valid signals found to process.")
         return
 
-    # Convert time strings to datetime objects
+    # Convert time strings to datetime objects aware of timezone
+    tz = pytz.timezone(TIMEZONE_MANUAL)
+    now_tz = datetime.now(tz)
+    
+    # Process signals relative to target timezone
+    processed_signals = []
+    
     for sig in parsed_signals:
         hh, mm = map(int, sig["time"].split(":"))
-        now = datetime.now()
-        sched_time = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        if sched_time < now:
+        
+        # Create a datetime for today at HH:MM in the target timezone
+        sched_time = now_tz.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        
+        # If time passed, assume next day
+        if sched_time < now_tz:
             sched_time += timedelta(days=1)
+            
         sig["time"] = sched_time
+        processed_signals.append(sig)
 
     # Group signals by scheduled time
     grouped = defaultdict(list)
-    for sig in parsed_signals:
+    for sig in processed_signals:
         grouped[sig["time"]].append(sig)
 
-    await update.message.reply_text(f"✅ Found {len(parsed_signals)} signals. Scheduling trades...")
+    await update.message.reply_text(f"✅ Found {len(processed_signals)} signals. Scheduling trades (Timezone: {TIMEZONE_MANUAL})...")
 
     all_trade_tasks = []
     for sched_time in sorted(grouped.keys()):
-        now = datetime.now()
-        delay = (sched_time - now).total_seconds()
+        # Recalculate 'now' inside loop to be precise
+        now_runtime = datetime.now(tz)
+        delay = (sched_time - now_runtime).total_seconds()
 
         if delay > 0:
             msg = f"⏳ Waiting {int(delay)}s until {sched_time.strftime('%H:%M')} for {len(grouped[sched_time])} signal(s)..."
@@ -226,6 +270,7 @@ async def process_and_schedule_signals(update: Update, parsed_signals: list):
                 logger.error(f"Failed to send notification: {e}")
 
         for s in grouped[sched_time]:
+            # execute trade
             task = asyncio.create_task(run_trade(api, s["pair"], s["direction"], s["expiry"], config.trade_amount, notification_callback=notify))
             all_trade_tasks.append(task)
 
@@ -341,6 +386,36 @@ async def set_martingale(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("⚠️ Invalid number.")
 
+async def switch_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global active_channel_key
+    
+    if not monitor:
+        await update.message.reply_text("⚠️ Auto-Monitor not initialized (check API_ID/HASH).")
+        return
+
+    # Toggle
+    new_key = "2" if active_channel_key == "1" else "1"
+    new_channel = CHANNELS.get(new_key)
+    
+    if not new_channel:
+        await update.message.reply_text(f"⚠️ Channel {new_key} not configured in .env (CHANNEL_ID_{new_key}).")
+        return
+
+    active_channel_key = new_key
+    
+    # Restart monitor if it was running or should run
+    if monitor.is_running:
+         monitor.stop()
+         await asyncio.sleep(1) # grace period
+         asyncio.create_task(monitor.start(new_channel))
+         await update.message.reply_text(f"🔄 Switched to Channel {new_key}: `{new_channel}` (Monitor Restarted)")
+    else:
+         # Just set the new target for next start
+         # Or should we auto-start? Let's just switch the target.
+         # But usually switch implies "listen to this now".
+         asyncio.create_task(monitor.start(new_channel))
+         await update.message.reply_text(f"🔄 Switched and Started Channel {new_key}: `{new_channel}`")
+
 async def pause_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config.paused = True
     await update.message.reply_text("⏸️ Bot PAUSED. No new trades will be taken.")
@@ -365,6 +440,23 @@ async def toggle_suppression(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await update.message.reply_text("⚠️ Invalid option. Use 'on' or 'off'.")
 
+async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gracefully shuts down the bot."""
+    if str(update.effective_chat.id) != str(ADMIN_ID):
+        return
+
+    await update.message.reply_text("🛑 Shutting down system... Bye!")
+    logger.info("🛑 Received shutdown command. Exiting...")
+    
+    if monitor and monitor.is_running:
+        monitor.stop()
+    
+    # Give time for reply to send
+    await asyncio.sleep(1)
+    
+    # Kill process
+    os._exit(0)
+
 # --- Startup Notification ---
 async def notify_admin_startup(app):
     """
@@ -382,6 +474,8 @@ async def notify_admin_startup(app):
         message = (
             f"🤖 *Trading Bot Online*\n"
             f"📧 Account: `{EMAIL}`\n"
+            f"🔌 Connection: ✅ Connected\n"
+            f"📡 Auto-Monitor: {'✅ Running' if monitor and monitor.is_running else '❌ Off'}\n"
             f"💼 Account Type: *{acc_type}*\n"
             f"💰 Balance: *${bal:.2f}*\n\n"
             f"✅ Ready to receive signals!"
@@ -413,7 +507,9 @@ def main():
     app.add_handler(CommandHandler("set_martingale", set_martingale))
     app.add_handler(CommandHandler("pause", pause_bot))
     app.add_handler(CommandHandler("resume", resume_bot))
+    app.add_handler(CommandHandler("resume", resume_bot))
     app.add_handler(CommandHandler("suppress", toggle_suppression))
+    app.add_handler(CommandHandler("shutdown", shutdown_bot))
 
     logger.info("🌐 Initializing bot...")
 
@@ -421,7 +517,7 @@ def main():
         """Function to run after initialization and before polling starts."""
         try:
             # Initialize the bot and connect to IQ Option
-            await app.bot.initialize()
+            # app.bot.initialize() # Removed: handled by Application
             await app.bot.delete_webhook()
             logger.info("✅ Deleted old webhook before polling.")
 
@@ -431,6 +527,11 @@ def main():
 
             # Notify admin that the bot is online
             await notify_admin_startup(app)
+
+            # Start Auto-Monitor if configured
+            default_chan = CHANNELS.get(active_channel_key)
+            if monitor and default_chan:
+                asyncio.create_task(monitor.start(default_chan))
 
         except Exception as e:
             logger.error(f"❌ An error occurred during startup: {e}")

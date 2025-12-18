@@ -17,6 +17,7 @@ class MessageHandler:
             'digital_options': {},
             'binary_options': {}
         }
+        self.recent_binary_opens = []
         self.position_info = {}
 
     def handle_message(self, message):
@@ -83,21 +84,43 @@ class MessageHandler:
             self.open_positions['digital_options'][message["request_id"]] = message["msg"].get("message")
 
     def _handle_position_changed(self, message):
-        self.position_info[int(message["msg"]["raw_event"]["order_ids"][0])] = message['msg']
-        self._save_data(message['msg'], 'positions')
+        try:
+            if "raw_event" in message["msg"] and "order_ids" in message["msg"]["raw_event"]:
+                self.position_info[int(message["msg"]["raw_event"]["order_ids"][0])] = message['msg']
+                self._save_data(message['msg'], 'positions')
+        except Exception as e:
+            logger.warning(f"Error handling position changed: {e}")
 
-    # ================= BINARY HANDLERS =================
     def _handle_binary_option_opened(self, message):
-        option_id = message["msg"].get("id")
-        if option_id:
-            self.open_positions['binary_options'][message["request_id"]] = option_id
-        else:
-            self.open_positions['binary_options'][message["request_id"]] = message["msg"].get("message")
+        try:
+            msg_data = message.get("msg", {})
+            self.recent_binary_opens.append(msg_data)
+            # Keep list small
+            if len(self.recent_binary_opens) > 20:
+                self.recent_binary_opens.pop(0)
+                
+            # Legacy/Debug logic (optional, keeping for safety if request_id ever appears)
+            if "request_id" in message:
+                req_id = message["request_id"]
+                option_id = msg_data.get("id") or msg_data.get("option_id")
+                if option_id:
+                     self.open_positions['binary_options'][req_id] = option_id
+        except Exception as e:
+            logger.error(f"Error handling binary option opened: {e} | Msg: {message}")
 
     def _handle_binary_option_closed(self, message):
-        option_id = int(message["msg"]["id"])
-        self.position_info[option_id] = message["msg"]
-        self._save_data(message['msg'], 'binary_positions')
+        try:
+            msg = message["msg"]
+            logger.info(f"Binary Option Closed received: {msg}")
+            
+            option_id = msg.get("id") or msg.get("option_id")
+            if option_id:
+                self.position_info[int(option_id)] = msg
+                self._save_data(msg, 'binary_positions')
+            else:
+                logger.warning(f"Binary option closed without ID: {message}")
+        except Exception as e:
+            logger.error(f"Error handling binary option closed: {e}")
 
     # Utility
     def _save_data(self, message, filename):
