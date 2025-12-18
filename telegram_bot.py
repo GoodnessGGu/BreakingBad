@@ -14,7 +14,7 @@ from telegram.ext import (
 from telegram import ReplyKeyboardMarkup, KeyboardButton
 from iqclient import IQOptionAPI, run_trade
 from signal_parser import parse_signals_from_text, parse_signals_from_file
-from settings import config, TIMEZONE_MANUAL
+from settings import config, TIMEZONE_MANUAL, update_env_variable
 from keep_alive import keep_alive
 from channel_monitor import ChannelMonitor
 import pytz
@@ -84,7 +84,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
         [KeyboardButton("📡 Auto-Monitor"), KeyboardButton("🔄 Switch Channel")],
         [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
-        [KeyboardButton("⚙️ Settings"), KeyboardButton("ℹ️ Help")]
+        [KeyboardButton("🔄 Toggle Mode"), KeyboardButton("⚙️ Settings")],
+        [KeyboardButton("ℹ️ Help")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
@@ -141,6 +142,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     elif text == "🔄 Switch Channel":
         await switch_channel(update, context)
+    elif text == "🔄 Toggle Mode":
+        await toggle_mode(update, context)
         
     elif text == "⚙️ Settings":
         await settings_info(update, context)
@@ -435,6 +438,34 @@ async def toggle_suppression(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await update.message.reply_text("⚠️ Invalid option. Use 'on' or 'off'.")
 
+async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    modes = ['AUTO', 'BINARY', 'DIGITAL']
+    current = config.preferred_trading_type
+    
+    # Find next mode
+    try:
+        idx = modes.index(current)
+    except ValueError:
+        idx = 0 # Default to AUTO if unknown
+    
+    new_mode = modes[(idx + 1) % len(modes)]
+    
+    # Update Config
+    config.preferred_trading_type = new_mode
+    
+    # Persist to .env
+    update_env_variable("PREFERRED_TRADING_TYPE", new_mode)
+    
+    msg = f"🔄 Mode switched to: *{new_mode}*\n"
+    if new_mode == "BINARY":
+        msg += "⚡ _Fastest for OTC (Skips Digital check)_"
+    elif new_mode == "DIGITAL":
+        msg += "⚠️ _Digital Only (May fail on OTC)_"
+    else:
+        msg += "🧠 _Smart Auto-Switching_"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
 async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Gracefully shuts down the bot."""
     if str(update.effective_chat.id) != str(ADMIN_ID):
@@ -504,6 +535,7 @@ def main():
     app.add_handler(CommandHandler("resume", resume_bot))
     app.add_handler(CommandHandler("resume", resume_bot))
     app.add_handler(CommandHandler("suppress", toggle_suppression))
+    app.add_handler(CommandHandler("mode", toggle_mode))
     app.add_handler(CommandHandler("shutdown", shutdown_bot))
 
     logger.info("🌐 Initializing bot...")

@@ -58,3 +58,38 @@ class TradingConfig:
                 f"account={self.account_type})")
 
 config = TradingConfig()
+
+def update_env_variable(key: str, value: str):
+    """Updates a variable in the .env file."""
+    try:
+        env_file_path = os.path.join(os.path.dirname(__file__), '.env')
+        
+        # Read all lines
+        lines = []
+        if os.path.exists(env_file_path):
+            with open(env_file_path, 'r') as f:
+                lines = f.readlines()
+        
+        key_found = False
+        new_lines = []
+        
+        for line in lines:
+            if line.strip().startswith(f"{key}="):
+                new_lines.append(f"{key}={value}\n")
+                key_found = True
+            else:
+                new_lines.append(line)
+        
+        if not key_found:
+            if new_lines and not new_lines[-1].endswith('\n'):
+                 new_lines.append('\n')
+            new_lines.append(f"{key}={value}\n")
+            
+        with open(env_file_path, 'w') as f:
+            f.writelines(new_lines)
+            
+        # Update os.environ as well for good measure (though config object is main source)
+        os.environ[key] = value
+        
+    except Exception as e:
+        print(f"Failed to update .env: {e}")
