@@ -222,66 +222,49 @@ class TradeManager:
     
     async def get_binary_trade_outcome(self, order_id: int, expiry: int = 1):
         start_time = time.time()
-        timeout = get_remaining_secs(self.message_handler.server_time, expiry)
+        # Increase timeout buffer for OTC/delayed server responses
+        timeout = get_remaining_secs(self.message_handler.server_time, expiry) + 30
 
-        while time.time() - start_time < timeout + 3:
+        while time.time() - start_time < timeout:
             order_data = self.message_handler.position_info.get(order_id, {})
-            # Binary options closed status check might differ slightly or be same
-            # Usually 'status': 'closed' or check 'close_time'
+            
             if order_data and (order_data.get("status") == "closed" or order_data.get("close_time")):
-                # PnL calc
-                profit_amount = order_data.get('profit_amount', 0)
-                # If profit_amount includes stake, we need to subtract it for net PnL? 
-                # Or checks 'win' string.
-                # IQ Option binary 'profit_amount' usually is the total return (stake + profit).
-                # If loss, it is 0.
-                # We need net PnL.
-                # But let's check what 'pnl' field exists.
-                # Often 'pnl' is not directly in binary msg, but 'profit_amount' - 'amount'
-                # or verify against win/loose
-                
-                # Let's try to assume it matches digital for now or inspect message structure if possible.
-                # But based on common knowledge:
-                active_id = order_data.get('active_id') # checking just in case
-                
-                # DEBUG: Log full data to analyze win/loss fields
-                logger.debug(f"Binary Close Data: {order_data}")
-
+                # Check outcome
                 result = order_data.get('win')
+                active_id = order_data.get('active_id')
                 
                 invest = float(order_data.get('amount', 0))
                 profit_amount = float(order_data.get('profit_amount', 0) or 0) 
                 
-                # Robust PnL Calculation
-                if result == 'win':
-                    pnl = profit_amount - invest
-                elif result == 'equal':
-                    pnl = 0
-                elif result == 'loose':
-                    pnl = -invest
-                else:
-                    # Fallback if 'win' field is missing or unknown
-                    if profit_amount > invest:
-                         result = 'win'
+                pnl = 0.0
+                
+                # Robust status check
+                is_win = result in ['win', 'won'] or (result is None and profit_amount > invest)
+                is_equal = result == 'equal' or (result is None and profit_amount == invest and profit_amount > 0)
+
+                if is_win:
+                    # If profit_amount suggests it includes stake (Gross), subtract invest
+                    if profit_amount >= invest:
                          pnl = profit_amount - invest
-                    elif profit_amount > 0 and profit_amount < invest:
-                         # Partial return? Unlikely for binary but possible. Treat as loss of difference
-                         result = 'loose' 
-                         pnl = profit_amount - invest
-                    elif profit_amount == invest:
-                         result = 'equal'
-                         pnl = 0
                     else:
-                         result = 'loose'
-                         pnl = -invest
-                    
-                # Store pnl for consistency if not present
-                if 'pnl' not in order_data:
-                    order_data['pnl'] = pnl
+                         # Fallback: if profit_amount < invest but it says WIN, treat profit_amount as Net Profit?
+                         # Or it's a weird error. Let's assume gross first.
+                         pnl = profit_amount - invest
+                         if pnl <= 0:
+                             logger.warning(f"Win detected but PnL calc was <= 0 ({profit_amount} - {invest}). Forcing positive PnL.")
+                             pnl = max(0.01, profit_amount) # At least some profit
+                             
+                elif is_equal:
+                    pnl = 0.0
+                else:
+                    # Loss
+                    pnl = -invest
 
-                logger.info(f"Binary Trade closed - Order ID: {order_id}, Result: {result}, PnL: ${pnl:.2f}, ProfitAmt: {profit_amount}")
+                # Log for debugging
+                logger.info(f"Binary Outcome: {result} | Invest: {invest} | Return: {profit_amount} | PnL: {pnl}")
                 return True, pnl
-            await asyncio.sleep(.5)
 
-        return False, None
-
+            await asyncio.sleep(0.5)
+            
+        logger.warning(f"Binary Trade Outcome Timed Out (ID: {order_id})")
+        return False, 0.0

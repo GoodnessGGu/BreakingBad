@@ -35,4 +35,6 @@ services:
       - key: DATABASE_PATH
         value: "trades.db"
       - key: TIMEZONE
-        value: "America/Sao_Paulo"
+        value: "Africa/Lagos"
+      - key: PREFERRED_TRADING_TYPE
+        value: "AUTO"
