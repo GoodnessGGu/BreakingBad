@@ -264,7 +264,18 @@ class TradeManager:
                 logger.info(f"Binary Outcome: {result} | Invest: {invest} | Return: {profit_amount} | PnL: {pnl}")
                 return True, pnl
 
-            await asyncio.sleep(0.5)
+            # Calculate remaining wait time
+            remaining = (start_time + timeout) - time.time()
+            if remaining <= 0:
+                break
+
+            # Wait for NEXT event (or timeout) instead of sleep
+            try:
+                self.message_handler.binary_outcome_event.clear()
+                # fast reaction: if event triggers, we loop and check 'position_info' immediately
+                await asyncio.wait_for(self.message_handler.binary_outcome_event.wait(), timeout=min(remaining, 1.0))
+            except asyncio.TimeoutError:
+                pass # Loop again to check timeout or poll
             
         logger.warning(f"Binary Trade Outcome Timed Out (ID: {order_id})")
         return False, 0.0

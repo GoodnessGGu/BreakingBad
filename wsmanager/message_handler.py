@@ -20,7 +20,9 @@ class MessageHandler:
         # Optimization: Event-driven confirmation
         import asyncio
         self.pending_digital_orders = {} # {request_id: asyncio.Future}
-        self.binary_order_event = asyncio.Event() 
+        self.pending_digital_orders = {} # {request_id: asyncio.Future}
+        self.binary_order_event = asyncio.Event()
+        self.binary_outcome_event = asyncio.Event() # NEW: For instant close detection
         
         self.recent_binary_opens = []
         self.position_info = {}
@@ -104,6 +106,7 @@ class MessageHandler:
             if "raw_event" in message["msg"] and "order_ids" in message["msg"]["raw_event"]:
                 self.position_info[int(message["msg"]["raw_event"]["order_ids"][0])] = message['msg']
                 self._save_data(message['msg'], 'positions')
+                self.binary_outcome_event.set() # ✅ Signal update immediately
         except Exception as e:
             logger.warning(f"Error handling position changed: {e}")
 
@@ -136,6 +139,7 @@ class MessageHandler:
             if option_id:
                 self.position_info[int(option_id)] = msg
                 self._save_data(msg, 'binary_positions')
+                self.binary_outcome_event.set() # ✅ Signal trade.py immediately
             else:
                 logger.warning(f"Binary option closed without ID: {message}")
         except Exception as e:
