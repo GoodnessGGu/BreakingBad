@@ -26,12 +26,27 @@ def parse_channel_signal(message_text: str):
     """
     try:
         # Extract trade pair
-        trade_match = re.search(r'Trade:\s*.*?([A-Z]{3})/([A-Z]{3})', message_text)
-        if not trade_match:
-            logger.warning(f"Could not extract trade pair from message")
-            return None
+        # Extract trade pair (supports OTC)
+        # Looks for "AUD/JPY" ... "(OTC)" with potential emojis/spaces in between
+        trade_match = re.search(r'Trade:\s*.*?([A-Z]{3})/([A-Z]{3}).*?(\(OTC\)|OTC)\b', message_text, re.IGNORECASE)
         
-        pair = trade_match.group(1) + trade_match.group(2)  # e.g., "AUDJPY"
+        otc_found = False
+        if trade_match:
+             base = trade_match.group(1).upper()
+             quote = trade_match.group(2).upper()
+             otc_found = True
+        else:
+            # Fallback for non-OTC
+            trade_match = re.search(r'Trade:\s*.*?([A-Z]{3})/([A-Z]{3})', message_text, re.IGNORECASE)
+            if not trade_match:
+                 logger.warning(f"Could not extract trade pair from message")
+                 return None
+            base = trade_match.group(1).upper()
+            quote = trade_match.group(2).upper()
+
+        pair = f"{base}{quote}"
+        if otc_found:
+            pair += "-OTC"
         
         # Extract timer (expiry)
         timer_match = re.search(r'Timer:\s*(\d+)\s*minute', message_text, re.IGNORECASE)

@@ -403,7 +403,7 @@ async def switch_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Restart monitor if it was running or should run
     if monitor.is_running:
-         monitor.stop()
+         await monitor.stop()
          await asyncio.sleep(1) # grace period
          asyncio.create_task(monitor.start(new_channel))
          await update.message.reply_text(f"🔄 Switched to Channel {new_key}: `{new_channel}` (Monitor Restarted)")
