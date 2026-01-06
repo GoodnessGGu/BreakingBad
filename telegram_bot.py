@@ -9,7 +9,7 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
-from iqclient import IQOptionAPI
+from iqclient import IQOptionAlgoAPI as IQOptionAPI
 from settings import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TIMEZONE_OFFSET
 # Import refactored utilities. 
 from utilities import parse_signals, run_trade
@@ -132,6 +132,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📉 *Trading Signals*:\n"
         "Paste your signals directly in the chat. Supported formats:\n"
         "`06:15;EURUSD;CALL;5`\n"
+        "`06:15;EURUSD;CALL;S5` (for Blitz/5s)\n"
         "`06:15 - EURUSD CALL M5`\n\n"
         "The bot automatically detects valid signals and schedules them."
     )
@@ -235,8 +236,43 @@ def main():
 
 async def process_signals_task(context: ContextTypes.DEFAULT_TYPE, chat_id, signals):
     """
-    Schedule and execute trades based on signals.
+    Schedule and execute trades based on signals with JIT verification.
     """
+    if not signals:
+        return
+
+    # Sort signals by time
+    signals.sort(key=lambda x: x['time'])
+
+    # 1. IMMEDIATE VERIFICATION (First Signal)
+    first_sig = signals[0]
+    logger.info(f"🔎 Verifying first signal: {first_sig['asset']}...")
+    try:
+        # Check availability immediately
+        # Run in thread to avoid blocking loop
+        option_type = await asyncio.to_thread(
+            api.check_asset_availability, 
+            first_sig['asset'], 
+            first_sig['expiry'],
+            first_sig.get('is_seconds', False)
+        )
+        
+        if not option_type:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ Warning: First signal asset {first_sig['asset']} is currently UNAVAILABLE or CLOSED.\n"
+                     f"This might be a bad signal or market is closed. Scheduling anyway..."
+            )
+        else:
+             await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ First signal verified: {first_sig['asset']} is OPEN ({option_type.value}).\n"
+                     f"All {len(signals)} signals scheduled."
+            )
+    except Exception as e:
+        logger.error(f"Failed to verify first signal: {e}")
+
+    # Group signals by time
     grouped = defaultdict(list)
     for sig in signals:
         grouped[sig["time"]].append(sig)
@@ -246,59 +282,92 @@ async def process_signals_task(context: ContextTypes.DEFAULT_TYPE, chat_id, sign
         tz = timezone(timedelta(hours=TIMEZONE_OFFSET))
         now = datetime.now(tz)
         
-        # Calculate delay (both are aware now)
-        delay = (sched_time - now).total_seconds()
+        # Calculate time until 10 seconds BEFORE execution for JIT check
+        target_verification_time = sched_time - timedelta(seconds=10)
+        delay = (target_verification_time - now).total_seconds()
         
-        if delay < -60: # If signal is older than 60s
-             # Skip or execute immediately? Usually skip.
-             await context.bot.send_message(
-                 chat_id=chat_id, 
-                 text=f"⚠️ Skipping past signal at {sched_time.strftime('%H:%M')} (Time passed)"
-             )
-             continue
-
         if delay > 0:
-            await context.bot.send_message(
-                 chat_id=chat_id, 
-                 text=f"⏳ Waiting {int(delay)}s for {len(grouped[sched_time])} signal(s) at {sched_time.strftime('%H:%M')}..."
-            )
+            msg_text = f"⏳ Waiting {int(delay)}s until verification window for {len(grouped[sched_time])} signals at {sched_time.strftime('%H:%M')}..."
+            logger.info(msg_text)
+            # Optional: Notify user of long waits
+            if delay > 60:
+                await context.bot.send_message(chat_id=chat_id, text=msg_text)
+            
             await asyncio.sleep(delay)
+        
+        # --- JIT VERIFICATION PHASE (T-10s) ---
+        logger.info(f"🔎 JIT Verifying signals for {sched_time.strftime('%H:%M')}...")
+        batch_signals = grouped[sched_time]
+        verified_signals = []
 
-        # Execute trades
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"🚀 Executing {len(grouped[sched_time])} trades now!"
-        )
+        for sig in batch_signals:
+             # Check asset availability (Run in thread to be safe)
+             option_type = await asyncio.to_thread(
+                 api.check_asset_availability, 
+                 sig['asset'], 
+                 sig['expiry'],
+                 sig.get('is_seconds', False)
+             )
+
+             if option_type:
+                 # Update signal with determined option type
+                 sig['option_type'] = option_type
+                 verified_signals.append(sig)
+                 logger.info(f"✅ {sig['asset']} Verified -> {option_type.value}")
+             else:
+                 msg = f"❌ SKIP: {sig['asset']} unavailable at {sched_time.strftime('%H:%M')}"
+                 logger.warning(msg)
+                 await context.bot.send_message(chat_id=chat_id, text=msg)
+
+        if not verified_signals:
+            logger.warning(f"No valid signals for {sched_time}. Skipping batch.")
+            continue
+            
+        # Calculate remaining time to exact execution
+        now_after_check = datetime.now(tz)
+        final_delay = (sched_time - now_after_check).total_seconds()
         
-        # Determine strict sequential processing vs parallel based on mode
-        # COLLECTIVE mode implies we need to know result of Trade A before AMOUNT of Trade B is managed?
-        # If multiple signals are at SAME time, they will run in parallel.
-        # Collective Martingale primarily affects the NEXT batch or NEXT signal.
+        if final_delay > 0:
+             logger.info(f"Verified {len(verified_signals)} signals. Waiting {final_delay:.1f}s for precise execution...")
+             await asyncio.sleep(final_delay)
         
-        # Logic:
-        # 1. Calculate Amount = Base * Multiplier
-        # 2. Run trades
-        # 3. If Mode == COLLETIVE:
-        #    If ANY trade in this batch wins -> Reset Multiplier = 1
-        #    If ALL trades fail -> Multiplier *= 2
-        
-        current_amount = USER_CONFIG['amount'] * USER_CONFIG['collective_multiplier']
+        # Determine trade parameters
+        current_amount = USER_CONFIG['amount'] * USER_CONFIG.get('collective_multiplier', 1)
         current_gales = USER_CONFIG['max_gales']
         
-        # If using COLLECTIVE mode, the individual gales inside 'run_trade' should probably be 0? 
-        # Requirement: "A collective martingale, where if a signal results in a loss, it proceeds to the next signal and double the amount"
-        # This usually means NO internal gales for the signal itself if we are doing collective.
-        # However, user might want MIXED (try 2 gales on signal A, if all fail, double amount for signal B).
-        # We will respect `max_gales` AND `collective_strength`.
-        
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🚀 Executing {len(verified_signals)} verified trades now!"
+        )
+
+        # Execute trades
+        # Note: run_trade signature: (api, asset, direction, expiry, amount, max_gales, option_type)
+        # We need to pass option_type to run_trade
         results = await asyncio.gather(
             *(
                 asyncio.to_thread(
-                    run_trade, api, sig["asset"], sig["direction"], sig["expiry"], current_amount, current_gales
+                    run_trade, 
+                    api, 
+                    sig["asset"], 
+                    sig["direction"], 
+                    sig["expiry"], 
+                    current_amount, 
+                    current_gales,
+                    sig['option_type'] # Pass the verified option type
                 )
-                for sig in grouped[sched_time]
+                for sig in verified_signals
             )
         )
+
+        # Handle Collective Martingale Multiplier
+        if USER_CONFIG["mode"] == "COLLECTIVE":
+            # If ANY trade wins -> Reset
+            if any(res > 0 for res in results):
+                USER_CONFIG["collective_multiplier"] = 1
+                logger.info("Collective Win/Reset -> Multiplier 1x")
+            else:
+                 USER_CONFIG["collective_multiplier"] *= 2
+                 logger.info(f"Collective Loss -> Multiplier {USER_CONFIG['collective_multiplier']}x")
 
         # Report results and update Collective State
         batch_win = False

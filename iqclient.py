@@ -1,16 +1,17 @@
-#iqclient.py
 import sys
 import time
 import logging
 import requests
 from settings import *
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
+from models import *
 
 from trade import TradeManager
 from markets import MarketManager
 from accounts import AccountManager
 from wsmanager.iqwebsocket import WebSocketManager
 from wsmanager.message_handler import MessageHandler
+
 
 # Setup logging configuration
 logging.basicConfig(
@@ -20,34 +21,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class IQOptionAPI:
+class IQOptionAlgoAPI:
     """
     Main API class for IQOption automated trading.
-
+    
     Provides a unified interface for account management, market data,
     and trade execution through websocket connections.
     """
     def __init__(self, email=None, password=None, account_type=None):
         """
         Initialize the IQOption API client.
-
+        
         Args:
             email (str, optional): Login email. Defaults to settings.EMAIL
-            password (str, optional): Login password. Defaults to settings.PASSWORD
+            password (str, optional): Login password. Defaults to settings.PASSWORD  
             account_type (str, optional): Account type. Defaults to settings.DEFAULT_ACCOUNT_TYPE
         """
-        # Prefer args → else environment → else crash
-        self.email = email or os.getenv("IQ_EMAIL")
-        self.password = password or os.getenv("IQ_PASSWORD")
-        self.account_mode = account_type or os.getenv("IQ_ACCOUNT_TYPE", "practice")
-
-        # Validate required credentials
-        if not self.email or not self.password:
-            logger.error("❌ Email and password are required! Check environment variables IQ_EMAIL and IQ_PASSWORD.")
-            sys.exit(1)
-        # self.email = email or EMAIL
-        # self.password = password or PASSWORD
-        # self.account_mode = account_type or DEFAULT_ACCOUNT_TYPE
+        self.email = email or EMAIL
+        self.password = password or PASSWORD
+        self.account_mode = account_type or DEFAULT_ACCOUNT_TYPE
 
         # Initialize HTTP session for login requests
         self.session = requests.Session()
@@ -64,7 +56,7 @@ class IQOptionAPI:
     def _login(self):
         """
         Authenticate with IQOption using email/password.
-
+        
         Returns:
             bool: True if login successful, None otherwise
         """
@@ -80,7 +72,7 @@ class IQOptionAPI:
 
         try:
             # Send login request
-            response = self.session.post(url=LOGIN_URL,
+            response = self.session.post(url=LOGIN_URL, 
                 data={'identifier': self.email,'password': self.password})
             response.raise_for_status()
 
@@ -91,31 +83,31 @@ class IQOptionAPI:
         except Exception as e:
             logger.warning(e)
 
-
+    
     def _logout(self, data=None):
         """
         Log out from IQOption and close session.
-
+        
         Args:
             data (dict, optional): Additional logout data
         """
         if self.session.post(url=LOGOUT_URL, data=data).status_code == 200:
             self._connected = False
             logger.info(f'Logged out Successfully')
-
+    
     def get_session_id(self):
         """
         Get the current session ID (SSID) from cookies.
-
+        
         Returns:
             str: Session ID if available, None otherwise
         """
         return self.session.cookies.get('ssid')
-
+    
     def _connect(self):
         """
         Establish full connection: login + websocket + authentication.
-
+        
         Sets up the complete connection pipeline including websocket
         authentication and account initialization.
         """
@@ -133,48 +125,48 @@ class IQOptionAPI:
             # Set default account and mark as connected
             self.account_manager.set_default_account()
             self._connected = True
-
+    
     # Expose manager methods for convenience
     def get_current_account_balance(self):
         """
         Get the balance of the currently active account.
-
+        
         Returns:
             float: Current account balance
         """
         self._ensure_connected()
         return self.account_manager.get_active_account_balance()
-
+    
     def refill_demo_account(self, amount=10000):
         """
         Refill demo account with specified amount.
-
+        
         Args:
             amount (int): Amount to add to demo account. Defaults to 10000
-
+            
         Returns:
             bool: True if refill successful
         """
         self._ensure_connected()
         return self.account_manager.refill_demo_balance(amount)
-
+    
     def get_tournament_accounts(self):
         """
         Retrieve list of available tournament accounts.
-
+        
         Returns:
             list: Available tournament accounts
         """
         self._ensure_connected()
         return self.account_manager.get_tournament_accounts()
-
+    
     def switch_account(self, account_type:str):
         """
         Switch to a different account type (demo/real/tournament).
-
+        
         Args:
             account_type (str): Target account type
-
+            
         Returns:
             bool: True if switch successful, False if already on target account
         """
@@ -183,140 +175,198 @@ class IQOptionAPI:
             logger.warning(f'Already on {account_type.lower()} account. No switch needed.')
             return False  # or True, depending on how you want to handle this
         return self.account_manager.switch_account(account_type)
-
+    
     # Market Data Methods
     def get_candle_history(self, asset_name='EURUSD-op', count=50, timeframe=60):
         """
         Retrieve historical candlestick data for an asset.
-
+        
         Args:
             asset_name (str): Asset symbol. Defaults to 'EURUSD-op'
             count (int): Number of candles to retrieve. Defaults to 50
             timeframe (int): Timeframe in seconds. Defaults to 60
-
+            
         Returns:
             list: Historical candle data
         """
         self._ensure_connected()
         return self.market_manager.get_candle_history(asset_name, count, timeframe)
-
+    
     def save_candles_to_csv(self, candles_data=None, filename='candles'):
         """
         Export candlestick data to CSV file.
-
+        
         Args:
             candles_data (list, optional): Candle data to export
             filename (str): Output filename. Defaults to 'candles'
-
+            
         Returns:
             bool: True if save successful
         """
         return self.market_manager.save_candles_to_csv(candles_data, filename)
-
+    
     def _ensure_connected(self):
         """
         Verify that the bot is connected before executing operations.
-
+        
         Raises:
             Exception: If bot is not connected
         """
         if not self._connected:
             raise Exception("Bot is not connected. Call connect() first.")
-
+        
     def get_position_history_by_time(self, instrument_type: List[str],
                                     start_time: Optional[str] = None,
                                     end_time: Optional[str] = None):
         """
         Retrieve position history within a specific time range.
-
+        
         Args:
             instrument_type (List[str]): Types of instruments to include
             start_time (str, optional): Start time filter
             end_time (str, optional): End time filter
-
+            
         Returns:
             list: Position history within specified time range
         """
         self._ensure_connected()
         return self.account_manager.get_position_history_by_time(instrument_type, start_time=start_time, end_time=end_time)
-
+    
     def get_position_history_by_page(self, instrument_type: List[str],
                                     limit: int = 300,
                                     offset: int = 0):
         """
         Retrieve paginated position history.
-
+        
         Args:
             instrument_type (List[str]): Types of instruments to include
             limit (int): Maximum records per page. Defaults to 300
             offset (int): Number of records to skip. Defaults to 0
-
+            
         Returns:
             list: Paginated position history
         """
         self._ensure_connected()
         return self.account_manager.get_position_history_by_page(instrument_type, limit=limit, offset=offset)
+    
 
-    # Trade methods (digital kept as-is)
-    def execute_digital_option_trade(self, asset: str, amount: int, direction: str,
-                                    expiry: Optional[int] = 1):
+    def execute_options_trade(self, trade_params: OptionsTradeParams) -> Dict[str, Any]:
         """
-        Execute a digital options trade.
-
+        Execute an options trade (digital, binary, or blitz).
+        
         Args:
-            asset (str): Asset symbol to trade
-            amount (int): Trade amount
-            direction (str): Trade direction ('call' or 'put')
-            expiry (int, optional): Expiry time in minutes. Defaults to 1
-
+            trade_params (TradeParams): Trade parameters object containing all trade details
+                
         Returns:
             dict: Trade execution result with order ID
+            
+        Example:
+            params = TradeParams(asset="EURUSD", amount=100, direction=Direction.CALL, 
+                               expiry=5, option_type=OptionType.BINARY)
+            result = execute_option_trade(params)
         """
         self._ensure_connected()
-        return self.trade_manager._execute_digital_option_trade(asset, amount, direction, expiry=expiry)
-
+        
+        # Route to appropriate trade manager method based on option type
+        if trade_params.option_type == OptionType.DIGITAL_OPTION:
+            return self.trade_manager._place_digital_option_trade(
+                trade_params.asset, 
+                trade_params.amount, 
+                trade_params.direction.value, 
+                expiry=trade_params.expiry
+            )
+        elif trade_params.option_type == OptionType.BINARY_OPTION:
+            return self.trade_manager._place_binary_options_trade(
+                trade_params.asset, 
+                trade_params.amount, 
+                trade_params.direction.value, 
+                expiry=trade_params.expiry
+            )
+        elif trade_params.option_type == OptionType.BLITZ_OPTION:
+            # Blitz trades reuse binary/turbo logic but with specific routing/ID
+            return self.trade_manager._place_blitz_options_trade(
+                trade_params.asset,
+                trade_params.amount,
+                trade_params.direction.value,
+                expiry=trade_params.expiry # Expiry in seconds for Blitz
+            )
+        
     def get_trade_outcome(self, order_id: int ,expiry:int):
         """
         Get the outcome of a completed trade.
-
+        
         Args:
             order_id (int): ID of the trade order
             expiry (int): Expiry time in minutes
-
+            
         Returns:
             dict: Trade outcome (win/loss/refund) and payout details
         """
         self._ensure_connected()
         return self.trade_manager.get_trade_outcome(order_id, expiry=expiry)
 
-    # ---- New binary option wrappers ----
-    def execute_binary_option_trade(self, asset: str, amount: int, direction: str,
-                                    expiry: Optional[int] = 1):
+    def check_asset_availability(self, asset_name: str, expiry: int = 1, is_seconds: bool = False) -> Optional[OptionType]:
         """
-        Execute a binary options trade.
-
+        Check if an asset is available for trading and return the preferred OptionType.
+        Priority: Blitz (if is_seconds=True) > Digital Option > Binary Option.
+        
         Args:
-            asset (str): Asset symbol to trade
-            amount (int): Trade amount
-            direction (str): Trade direction ('call' or 'put')
-            expiry (int, optional): Expiry time in minutes. Defaults to 1
-
+            asset_name (str): Name of the asset (e.g. 'EURUSD').
+            expiry (int): Expiry time. 
+            is_seconds (bool): If True, treats expiry as seconds and checks Blitz first.
+            
         Returns:
-            tuple: (success: bool, order_id_or_error)
+            OptionType: The available option type, or None if unavailable.
         """
         self._ensure_connected()
-        return self.trade_manager._execute_binary_option_trade(asset, amount, direction, expiry=expiry)
+        
+        # 0. Check Blitz Options (if strictly seconds-based trade)
+        if is_seconds:
+             try:
+                binary_data = self.market_manager.get_underlying_assests('binary-option')
+                if 'blitz' in binary_data:
+                    actives = binary_data['blitz'].get('actives', {})
+                    for _, info in actives.items():
+                        if info.get('ticker') == asset_name or info.get('name') == asset_name:
+                            if not info.get('is_suspended', True):
+                                return OptionType.BLITZ_OPTION
+             except Exception as e:
+                logger.warning(f"Error checking Blitz availability for {asset_name}: {e}")
 
-    def get_binary_trade_outcome(self, order_id: int, expiry: int = 1):
-        """
-        Get the outcome of a binary options trade.
-
-        Args:
-            order_id (int): Order ID of the binary trade
-            expiry (int): Expiry time in minutes
-
-        Returns:
-            tuple: (success: bool, pnl: float or None)
-        """
-        self._ensure_connected()
-        return self.trade_manager.get_binary_trade_outcome(order_id, expiry=expiry)
+        # 1. Check Digital Options (Only if NOT a seconds-based Blitz request)
+        if not is_seconds:
+            try:
+                # Get underlying list for digital options
+                digital_assets = self.market_manager.get_underlying_assests('digital-option')
+                # Check if our asset is in the list and not suspended
+                for item in digital_assets:
+                    if item['name'] == asset_name and not item.get('is_suspended', True):
+                        return OptionType.DIGITAL_OPTION
+            except Exception as e:
+                logger.warning(f"Error checking Digital availability for {asset_name}: {e}")
+            
+        # 2. Check Binary Options
+        try:
+            # Binary options structure is different (grouped by type)
+            binary_data = self.market_manager.get_underlying_assests('binary-option')
+            
+            # Determine correct group based on expiry (turbo < 5m, binary >= 5m)
+            # Safe default fallback logic
+            if is_seconds:
+                # Fallback for seconds if Blitz not found? Maybe Turbo supports it?
+                # Usually Turbo min is 1m, so unlikely. But we can try 'turbo'.
+                group = 'turbo'
+            else:
+                group = 'turbo' if expiry < 5 else 'binary'
+            
+            if group in binary_data:
+                actives = binary_data[group].get('actives', {})
+                for _, info in actives.items():
+                    # Binary data usually uses 'ticker' or 'name'
+                    if info.get('ticker') == asset_name or info.get('name') == asset_name:
+                        if not info.get('is_suspended', True):
+                            return OptionType.BINARY_OPTION
+        except Exception as e:
+            logger.warning(f"Error checking Binary availability for {asset_name}: {e}")
+            
+        return None

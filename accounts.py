@@ -1,4 +1,3 @@
-#accounts.py
 import sys
 import time
 import json
@@ -48,7 +47,7 @@ class AccountManager:
         self.ws_manager = websocket_manager
         self.message_handler = message_handler
         self.current_account_type = self._validate_account_type(DEFAULT_ACCOUNT_TYPE.lower(), exit=True)
-
+    
     def set_default_account(self) -> None:
         """
         Set up the default trading account based on settings.DEFAULT_ACCOUNT_TYPE
@@ -69,9 +68,9 @@ class AccountManager:
             # Set current account ID based on the configured account type
             self.current_account_id = self.available_accounts[self.current_account_type]['id']
 
-            logger.info(f'Currently Active Account - {self.current_account_type.capitalize()}, '
-                        f"Balance: {self.available_accounts[self.current_account_type]['amount']:.2f}"
-                        )
+            logger.info(f"Currently Active Account - {self.current_account_type.capitalize()}, "
+            f"Balance: {self.available_accounts[self.current_account_type]['amount']:.2f}"
+            )
 
             # Subscribe to portfolio position changes for tracking trades
             self._portfolio_position_change('subscribeMessage', self.current_account_id)
@@ -94,22 +93,22 @@ class AccountManager:
         # types_ids: 1=real, 4=demo, 2=tournament, 6=other
         # tournaments_statuses_ids: 3=active, 2=completed
         msg = {
-            "name": "internal-billing.get-balances",
-            "version": "1.0",
-            "body": {
-                "types_ids": [1, 4, 2, 6],
-                "tournaments_statuses_ids": [3, 2]
+                "name": "internal-billing.get-balances",
+                "version": "1.0",
+                "body": {
+                    "types_ids": [1, 4, 2, 6],
+                    "tournaments_statuses_ids": [3, 2]
+                }
             }
-        }
-
+        
         self.ws_manager.send_message("sendMessage", msg)
-
+        
         # Wait for response with polling
         while self.message_handler.balance_data is None:
             time.sleep(0.1)
-
+        
         return self.message_handler.balance_data
-
+    
     def get_tournament_accounts(self) -> List[TournamentAccount]:
         """
         Retrieve all available tournament accounts by filtering accounts/balances.
@@ -135,7 +134,7 @@ class AccountManager:
             for item in self.message_handler.balance_data
             if item['type'] == ACCOUNT_TOURNAMENT
         ]
-
+    
     def get_active_account_balance(self) -> Optional[float]:
         """
         Get the balance of the currently active account.
@@ -146,13 +145,13 @@ class AccountManager:
 
         # Fetch all account balances
         accounts = self.get_account_balances()
-
+        
         # Find and return balance for the current account
         for account in accounts:
             if account['id'] == self.current_account_id:
                 return account['amount']
-
-    def _validate_account_type(self, account_type: str, exit=False) -> str:
+            
+    def _validate_account_type(self, account_type:str, exit=False) -> str:
         """
         Validate that the account type is valid.
         
@@ -164,13 +163,16 @@ class AccountManager:
             str: Lowercase account type if valid, None if invalid.
         """
 
+        if account_type.lower() == 'practice':
+            return 'demo'
+
         if account_type.lower() not in ['real', 'demo']:
             logger.error(f"{account_type} is Invalid Account Type! Needs to one of ['real', 'demo']")
             if exit:
                 sys.exit()
             return
         return account_type.lower()
-
+    
     def switch_account(self, account_type: str) -> None:
         """
         Switch between real and demo accounts.
@@ -183,8 +185,12 @@ class AccountManager:
         """
 
         # Validate the requested account type
-        if not self._validate_account_type(account_type):
+        valid_type = self._validate_account_type(account_type)
+        if not valid_type:
             return
+        
+        # Update account_type to the validated one (e.g. 'practice' -> 'demo')
+        account_type = valid_type
 
         # Get current account balances
         accounts = self.get_account_balances()
@@ -192,8 +198,8 @@ class AccountManager:
         # Find the target account ID based on account type
         target_account_id = None
         for account in accounts:
-            if ((account_type.lower() == 'real' and account['type'] == 1) or
-                    (account_type.lower() == 'demo' and account['type'] == 4)):
+            if ((account_type == 'real' and account['type'] == 1) or 
+                (account_type == 'demo' and account['type'] == 4)):
                 target_account_id = account['id']
                 break
 
@@ -203,11 +209,12 @@ class AccountManager:
         # Verify switch was successful and update current account type
         if self.current_account_id == target_account_id:
             self.current_account_type = account_type.lower()
-            logger.info(
-                f'Successfully switched to {account_type.capitalize()} Account (ID: {target_account_id}, Balance: {self.get_active_account_balance()})')
+            logger.info(f'Successfully switched to {account_type.capitalize()} Account'
+                        f'(ID: {target_account_id}, Balance: {self.get_active_account_balance()})')
             return True
 
-    def _set_portfolio_subscription(self, account_id: int) -> None:
+    
+    def _set_portfolio_subscription(self, account_id:int)-> None:
         """
         Update portfolio subscription from/to a specific account.
         
@@ -221,14 +228,14 @@ class AccountManager:
         # Unsubscribe from current account if exists
         if self.current_account_id is not None:
             self._portfolio_position_change('unsubscribeMessage', self.current_account_id)
-
+        
         # Update current account ID
         self.current_account_id = account_id
 
         # Subscribe to new account's position changes
         self._portfolio_position_change('subscribeMessage', self.current_account_id)
-
-    def _portfolio_position_change(self, msg_name: str, account_id: int) -> None:
+    
+    def _portfolio_position_change(self, msg_name:str, account_id:int) -> None:
         """
         Subscribe or unsubscribe to portfolio position changes for an account.
         
@@ -236,7 +243,7 @@ class AccountManager:
             msg_name (str): WebSocket message type ('subscribeMessage' or 'unsubscribeMessage').
             account_id (int): Account ID to subscribe/unsubscribe to.
         """
-
+                
         # List of instrument types to monitor
         instrument_types = ['cfd', 'forex', 'crypto', 'digital-option', 'binary-option']
 
@@ -253,7 +260,7 @@ class AccountManager:
                 }
             }
             self.ws_manager.send_message(msg_name, msg)
-
+    
     def refill_demo_balance(self, amount=10000) -> None:
         """
         Refill demo account balance to specified amount.
@@ -277,8 +284,8 @@ class AccountManager:
         time.sleep(1)
 
     def get_position_history_by_page(self, instrument_type: List[str],
-                                     limit: int = 300,
-                                     offset: int = 0) -> List[Dict[str, Any]]:
+                                    limit: int = 300,
+                                    offset: int = 0) -> List[Dict[str, Any]]:
         """
         Retrieve position history using pagination.
         
@@ -299,11 +306,11 @@ class AccountManager:
 
         # Prepare pagination-based query message
         msg = {
-            "body": {
-                "instrument_types": instrument_type,
-                "limit": limit,
-                "offset": offset,
-                "user_balance_id": self.current_account_id,
+        "body": {
+            "instrument_types": instrument_type,
+            "limit": limit,
+            "offset": offset,
+            "user_balance_id": self.current_account_id,
             },
             "name": "portfolio.get-history-positions",
             "version": "2.0",
@@ -312,8 +319,8 @@ class AccountManager:
         return self._send_position_query(msg)
 
     def get_position_history_by_time(self, instrument_type: List[str],
-                                     start_time: Optional[str] = None,
-                                     end_time: Optional[str] = None) -> List[Dict[str, Any]]:
+                                    start_time: Optional[str] = None,
+                                    end_time: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Retrieve position history for a specific time range.
         
@@ -344,6 +351,7 @@ class AccountManager:
         }
 
         return self._send_position_query(msg)
+    
 
     def _send_position_query(self, msg: dict) -> list:
         """       
@@ -362,9 +370,9 @@ class AccountManager:
 
         # Reset previous response data
         self.message_handler.hisory_positions = None
-
+    
         self.ws_manager.send_message("sendMessage", msg)
-
+        
         # Wait for response with timeout protection
         timeout = 10
         start_wait = time.time()
@@ -372,12 +380,14 @@ class AccountManager:
             if time.time() - start_wait > timeout:
                 raise TimeoutError("Timeout waiting for position history response")
             time.sleep(0.1)
-
+        
         return self.message_handler.hisory_positions
+    
+
 
     # Add this method to your AccountManager class
-    def get_filtered_position_history(self, instrument_types: List[str] = ["turbo-option", "binary-option"],
-                                      limit: int = 300, offset: int = 0) -> List[Dict[str, Any]]:
+    def get_filtered_position_history(self, instrument_types: List[str] = ["turbo-option", "binary-option"], 
+                                    limit: int = 300, offset: int = 0) -> List[Dict[str, Any]]:
         """       
         Retrieves position history and filters out only the relevant fields,
         converting timestamps to readable datetime format.
@@ -396,7 +406,7 @@ class AccountManager:
 
         # Get raw position history data
         positions = self.get_position_history_by_page(instrument_types, limit, offset)
-
+        
         filtered_data = []
         for position in positions:
             # Extract only the fields we need
@@ -421,12 +431,12 @@ class AccountManager:
                 filtered_position['close_time'] = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
 
             filtered_data.append(filtered_position)
-
+        
         return filtered_data
 
-    def save_filtered_positions_to_file(self, filename: str = 'positions.json',
-                                        instrument_types: List[str] = ["turbo-option", "binary-option"],
-                                        limit: int = 300, offset: int = 0) -> None:
+    def save_filtered_positions_to_file(self, filename: str = 'positions.json', 
+                                    instrument_types: List[str] = ["turbo-option", "binary-option"],
+                                    limit: int = 300, offset: int = 0) -> None:
         """        
         Retrieves filtered position history and saves it to a JSON file
         for external analysis or record keeping.
@@ -441,9 +451,9 @@ class AccountManager:
 
         # Get filtered position data
         filtered_data = self.get_filtered_position_history(instrument_types, limit, offset)
-
+        
         # Save data to JSON file with proper formatting
         with open(filename, 'w') as file:
             json.dump(filtered_data, file, indent=4)
-
+        
         logger.info(f"Saved {len(filtered_data)} positions to {filename}")
