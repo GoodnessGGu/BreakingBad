@@ -1,6 +1,10 @@
 # utilities.py
 import logging
-from datetime import datetime, timedelta
+from collections import defaultdict
+import re
+import asyncio
+from datetime import datetime, timedelta, date, timezone
+from settings import TIMEZONE_OFFSET
 
 logger = logging.getLogger(__name__)
 
@@ -117,3 +121,99 @@ def get_remaining_secs(timestamp, duration):
 
     # Calculate remaining seconds by subtracting current time from expiration time
     return expiry_ts - int(timestamp/1000)
+
+
+def parse_signals(text: str):
+    """
+    Parse signals from format: HH:MM;ASSET;DIRECTION;EXPIRY
+    Example: 06:15;EURUSD;CALL;5
+    """
+    signals = []
+    # Pattern for HH:MM;ASSET;DIRECTION;EXPIRY
+    pattern1 = re.compile(r"(\d{2}:\d{2});([A-Z0-9\-/]+);(CALL|PUT);(\d+)", re.IGNORECASE)
+    # Pattern for HH:MM - ASSET DIRECTION MX (from first_main.py style)
+    pattern2 = re.compile(r"(\d{1,2}:\d{2})\s*-\s*([A-Z0-9\-/]+)\s+(CALL|PUT)\s+M(\d+)", re.IGNORECASE)
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+            
+        # Try first pattern
+        m = pattern1.search(line)
+        if not m:
+            # Try second pattern
+            m = pattern2.search(line)
+            
+        if not m:
+            continue
+            
+        time_str, asset, direction, expiry = m.groups()
+        hh, mm = map(int, time_str.split(":"))
+        
+        # Create timezone object
+        tz = timezone(timedelta(hours=TIMEZONE_OFFSET))
+        
+        # Get today's date in target timezone
+        now_in_tz = datetime.now(tz)
+        target_date = now_in_tz.date()
+        
+        # Create timezone-aware datetime
+        scheduled_dt = datetime.combine(target_date, datetime.min.time()).replace(
+            hour=hh, minute=mm, second=0, tzinfo=tz
+        )
+        
+        # Handle day rollover if needed?
+        # If scheduled time is significantly in the past relative to now_in_tz, maybe it's for tomorrow?
+        # But usually signals are for "today". We'll stick to target_date.
+        
+        signals.append({
+            "time": scheduled_dt,
+            "asset": asset,
+             "direction": direction.lower(),
+            "expiry": int(expiry),
+            "line": line,
+        })
+    return sorted(signals, key=lambda x: x["time"])
+
+
+
+def run_trade(api, asset, direction, expiry, amount, max_gales=2):
+    """
+    Place trade with digital only, run martingale loop.
+    This runs in a separate thread when launched from asyncio.
+    """
+    current_amount = amount
+    for gale in range(max_gales + 1):
+        success, order_id = api.execute_digital_option_trade(
+            asset, current_amount, direction, expiry=expiry
+        )
+
+        if not success:
+            logger.error(f"❌ Failed to place trade on {asset} (Digital only)")
+            return
+
+        logger.info(
+            f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} (Expiry {expiry}m)"
+        )
+        pnl_ok, pnl = api.get_trade_outcome(order_id, expiry=expiry)
+        balance = api.get_current_account_balance()
+
+        if pnl_ok and pnl > 0:
+            msg = ""
+            if gale == 0:
+                msg = f"✅ Direct WIN on {asset} | Profit: ${pnl:.2f} | Balance: ${balance:.2f}"
+                logger.info(msg)
+            else:
+                msg = f"🔥 WIN after Gale {gale} on {asset} | Profit: ${pnl:.2f} | Balance: ${balance:.2f}"
+                logger.info(msg)
+            return {"success": True, "pnl": pnl, "gale": gale, "message": msg}
+        else:
+            logger.warning(
+                f"⚠️ LOSS on {asset} | Attempt {gale} | PnL: {pnl} | Balance: ${balance:.2f}"
+            )
+            current_amount *= 2  # Martingale
+
+    msg = f"💀 Lost all attempts (Direct + {max_gales} Gales) on {asset}"
+    logger.error(msg)
+    return {"success": False, "pnl": -amount, "gale": max_gales, "message": msg}
