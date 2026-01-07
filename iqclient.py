@@ -73,7 +73,7 @@ class IQOptionAlgoAPI:
         try:
             # Send login request
             response = self.session.post(url=LOGIN_URL, 
-                data={'identifier': self.email,'password': self.password})
+                data={'identifier': self.email,'password': self.password}, timeout=15)
             response.raise_for_status()
 
             # Check if session ID was received (login success indicator)
@@ -91,7 +91,7 @@ class IQOptionAlgoAPI:
         Args:
             data (dict, optional): Additional logout data
         """
-        if self.session.post(url=LOGOUT_URL, data=data).status_code == 200:
+        if self.session.post(url=LOGOUT_URL, data=data, timeout=15).status_code == 200:
             self._connected = False
             logger.info(f'Logged out Successfully')
     
@@ -119,7 +119,11 @@ class IQOptionAlgoAPI:
             self.websocket.send_message('ssid', self.get_session_id())
 
             ## Wait for profile confirmation (indicates successful auth)
+            start_wait = time.time()
             while self.message_handler.profile_msg is None:
+                if time.time() - start_wait > 10:
+                    logger.error("Timeout waiting for profile to sync")
+                    break
                 time.sleep(.1)
 
             # Set default account and mark as connected
@@ -137,7 +141,7 @@ class IQOptionAlgoAPI:
 
     def is_connected(self):
         """Return connection status."""
-        return self._connected
+        return self._connected and self.websocket.ws_is_active
     
     # Expose manager methods for convenience
     def get_current_account_balance(self):
@@ -267,8 +271,20 @@ class IQOptionAlgoAPI:
         Raises:
             Exception: If bot is not connected
         """
-        if not self._connected:
-            raise Exception("Bot is not connected. Call connect() first.")
+        if not self._connected or not self.websocket.ws_is_active:
+            logger.warning("Connection lost. Attempting auto-reconnect...")
+            for i in range(3):
+                try:
+                    self._connected = False 
+                    self.connect()
+                    if self._connected and self.websocket.ws_is_active:
+                         logger.info("✅ Auto-reconnected successfully.")
+                         return
+                except Exception as e:
+                    logger.warning(f"Reconnect attempt {i+1} failed: {e}")
+                    time.sleep(2)
+            
+            raise Exception("Bot is not connected. Auto-reconnect failed.")
         
     def get_position_history_by_time(self, instrument_type: List[str],
                                     start_time: Optional[str] = None,

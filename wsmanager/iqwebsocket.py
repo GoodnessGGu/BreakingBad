@@ -133,16 +133,9 @@ class WebSocketManager:
     def _on_close(self, ws, close_status_code, close_msg):
         """
         Handle WebSocket connection closed event.
-        
-        Called when the WebSocket connection is closed, either intentionally
-        or due to network issues.
-        
-        Args:
-            ws: WebSocket instance (unused but required by websocket-client)
-            close_status_code: WebSocket close status code
-            close_msg: Close message/reason
         """
         print("### WebSocket closed ###")
+        self.ws_is_active = False
     
     def close(self):
         """

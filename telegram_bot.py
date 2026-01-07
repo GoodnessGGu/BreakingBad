@@ -628,9 +628,9 @@ def main():
     # Initialize Telegram Bot
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(on_startup).build()
     
-    # Add connection monitor job (runs every 60s)
+    # Add connection monitor job (runs every 30s)
     if application.job_queue:
-        application.job_queue.run_repeating(monitor_connection, interval=60, first=10)
+        application.job_queue.run_repeating(monitor_connection, interval=30, first=5)
     
     start_handler = CommandHandler('start', start)
     help_handler = CommandHandler('help', help_command)
