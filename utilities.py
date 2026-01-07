@@ -8,7 +8,7 @@ from typing import Optional
 
 from settings import TIMEZONE_OFFSET
 from models import OptionType, Direction, OptionsTradeParams
-import iqclient # For type hinting if needed
+# import iqclient # Removed to avoid circular import (listener -> utilities -> iqclient -> trade -> utilities)
 
 logger = logging.getLogger(__name__)
 
@@ -78,70 +78,182 @@ def generate_request_id(request_id: Optional[str] = None) -> str:
     return microsecond_part
 
 
-def parse_signals(text: str):
+def parse_standard_signal(line: str):
     """
-    Parse signals from format: HH:MM;ASSET;DIRECTION;EXPIRY
-    Example: 
-      06:15;EURUSD;CALL;5  (Default minutes)
-      06:15;EURUSD;CALL;S5 (Seconds/Blitz)
-      06:15 - EURUSD CALL M5
-      06:15 - EURUSD CALL S5
+    Parse standard format: 06:15;EURUSD;CALL;5
+    Uses TIMEZONE_OFFSET from settings (default UTC-3 for this format).
     """
-    signals = []
     # Pattern 1: Semicolon separated
-    # Supports 5, M5, S5
     pattern1 = re.compile(r"(\d{2}:\d{2});([A-Z0-9\-/]+);(CALL|PUT);([MS]?\d+)", re.IGNORECASE)
-    
     # Pattern 2: Dash/Space separated
     pattern2 = re.compile(r"(\d{1,2}:\d{2})\s*-\s*([A-Z0-9\-/]+)\s+(CALL|PUT)\s+([MS]\d+)", re.IGNORECASE)
 
+    m = pattern1.search(line) or pattern2.search(line)
+    if not m:
+        return None
+
+    time_str, asset, direction, expiry_str = m.groups()
+    hh, mm = map(int, time_str.split(":"))
+
+    # Determine strict minutes vs seconds
+    is_seconds = False
+    expiry_val = 0
+    
+    expiry_str = expiry_str.upper()
+    if expiry_str.startswith('S'):
+        is_seconds = True
+        expiry_val = int(expiry_str[1:])
+    elif expiry_str.startswith('M'):
+        is_seconds = False
+        expiry_val = int(expiry_str[1:])
+    else:
+        is_seconds = False
+        expiry_val = int(expiry_str)
+
+    # Determine Source Timezone (Standard Signals usually UTC-3)
+    # We default this to -3 for standard string parsing as per user requirement
+    STANDARD_SIGNAL_OFFSET = -3 
+    source_tz = timezone(timedelta(hours=STANDARD_SIGNAL_OFFSET))
+    
+    # Target System Timezone (Where the bot runs, e.g. UTC+1 Lagos)
+    system_tz = timezone(timedelta(hours=TIMEZONE_OFFSET))
+    
+    now_source = datetime.now(source_tz)
+    target_date = now_source.date()
+    
+    # Create datetime in Source TZ
+    scheduled_dt_source = datetime.combine(target_date, datetime.min.time()).replace(
+        hour=hh, minute=mm, second=0, tzinfo=source_tz
+    )
+    
+    # Convert to System TZ (for execution checks)
+    scheduled_dt = scheduled_dt_source.astimezone(system_tz)
+    
+    # Handle overnight signals (if signal time < now - 1h, assume next day? or just today)
+    # For simplicity, assume today. 
+
+    return {
+        "time": scheduled_dt,
+        "asset": asset,
+        "direction": direction.lower(),
+        "expiry": expiry_val,
+        "is_seconds": is_seconds,
+        "line": line
+    }
+
+def parse_nigerian_signal(text_block: str):
+    """
+    Parse Nigerian format:
+    Trade: 🇪🇺 EUR/CAD 🇨🇦 (OTC)
+    Timer: 5 minutes
+    Entry: 6:19 PM
+    Direction: BUY 🟩
+    """
+    # Needs multi-line matching
+    try:
+        # Extract Asset
+        # Look for "Trade:" then capture content, especially XXX/XXX
+        asset_match = re.search(r"Trade:.*([A-Z]{3}/[A-Z]{3}).*", text_block, re.IGNORECASE)
+        if not asset_match:
+            return None
+        
+        raw_asset = asset_match.group(1).replace("/", "") # EUR/CAD -> EURCAD
+        
+        # Check for OTC in the line
+        if "(OTC)" in text_block or "OTC" in asset_match.group(0):
+            if not raw_asset.endswith("-OTC"):
+                raw_asset += "-OTC"
+
+        # Extract Time (12h format)
+        time_match = re.search(r"Entry:\s*(\d{1,2}:\d{2}\s*[AP]M)", text_block, re.IGNORECASE)
+        if not time_match:
+            return None
+        time_str = time_match.group(1)
+        
+        # Extract Expiry
+        expiry_match = re.search(r"Timer:\s*(\d+)", text_block, re.IGNORECASE)
+        if not expiry_match:
+            return None
+        expiry_val = int(expiry_match.group(1))
+
+        # Extract Direction
+        dir_match = re.search(r"Direction:\s*(BUY|SELL)", text_block, re.IGNORECASE)
+        if not dir_match:
+            return None
+        raw_dir = dir_match.group(1).upper()
+        direction = "call" if raw_dir == "BUY" else "put"
+
+        # Timezone Logic
+        # Input is Nigerian Time (UTC+1)
+        # We need to convert it to the User's Configured Timezone (TIMEZONE_OFFSET)
+        
+        # Parse 12h time
+        dt_struct = datetime.strptime(time_str, "%I:%M %p")
+        
+        # Nigerian Timezone (UTC+1)
+        nigeria_tz = timezone(timedelta(hours=1))
+        
+        # User Configured Timezone
+        user_tz = timezone(timedelta(hours=TIMEZONE_OFFSET))
+        
+        now_ng = datetime.now(nigeria_tz)
+        
+        # Combine with TODAY's date in Nigeria
+        scheduled_dt_ng = datetime.combine(now_ng.date(), dt_struct.time()).replace(tzinfo=nigeria_tz)
+        
+        # Convert to User Timezone to match the rest of the system
+        scheduled_dt_user = scheduled_dt_ng.astimezone(user_tz)
+        
+        return {
+            "time": scheduled_dt_user,
+            "asset": raw_asset, # EURUSD-OTC
+            "direction": direction,
+            "expiry": expiry_val,
+            "is_seconds": False, # Usually minutes for this channel
+            "line": "Nigerian Signal"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error parsing Nigerian signal: {e}")
+        return None
+
+def parse_signals(text: str):
+    """
+    Master parser to handle multiple formats.
+    """
+    signals = []
+    
+    # Strategy 1: Nigerian Format (Multi-line block)
+    # Check if text looks like a block signal
+    if "Trade:" in text and "Entry:" in text:
+        # Split by "NEW SIGNAL" or similar if multiple in one paste?
+        # Assuming single block per paste for now, or multiple separated by newlines
+        # Let's try to parse the whole text as one block first
+        sig = parse_nigerian_signal(text)
+        if sig:
+            signals.append(sig) 
+            return signals # Return immediately if block matched
+            
+        # If text contains keywords but failed, maybe multiple blocks?
+        # Future improvement: split by "🔔"
+        blocks = text.split("🔔")
+        for b in blocks:
+            sig = parse_nigerian_signal(b)
+            if sig:
+                signals.append(sig)
+        
+        if signals:
+            return sorted(signals, key=lambda x: x["time"])
+
+    # Strategy 2: Standard Line-by-Line
     for line in text.splitlines():
         line = line.strip()
-        if not line:
-            continue
-            
-        m = pattern1.search(line)
-        if not m:
-            m = pattern2.search(line)
-            
-        if not m:
-            continue
-            
-        time_str, asset, direction, expiry_str = m.groups()
-        hh, mm = map(int, time_str.split(":"))
+        if not line: continue
         
-        # Determine strict minutes vs seconds
-        is_seconds = False
-        expiry_val = 0
-        
-        expiry_str = expiry_str.upper()
-        if expiry_str.startswith('S'):
-            is_seconds = True
-            expiry_val = int(expiry_str[1:])
-        elif expiry_str.startswith('M'):
-            is_seconds = False
-            expiry_val = int(expiry_str[1:])
-        else:
-            # Default to minutes if just number
-            is_seconds = False
-            expiry_val = int(expiry_str)
+        sig = parse_standard_signal(line)
+        if sig:
+            signals.append(sig)
 
-        tz = timezone(timedelta(hours=TIMEZONE_OFFSET))
-        now_in_tz = datetime.now(tz)
-        target_date = now_in_tz.date()
-        
-        scheduled_dt = datetime.combine(target_date, datetime.min.time()).replace(
-            hour=hh, minute=mm, second=0, tzinfo=tz
-        )
-        
-        signals.append({
-            "time": scheduled_dt,
-            "asset": asset,
-            "direction": direction.lower(),
-            "expiry": expiry_val,
-            "is_seconds": is_seconds, # New flag
-            "line": line,
-        })
     return sorted(signals, key=lambda x: x["time"])
 
 

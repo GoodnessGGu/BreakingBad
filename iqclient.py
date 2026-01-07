@@ -50,7 +50,7 @@ class IQOptionAlgoAPI:
         self.websocket = WebSocketManager(self.message_handler)
         self.account_manager = AccountManager(self.websocket, self.message_handler)
         self.market_manager = MarketManager(self.websocket, self.message_handler)
-        self.trade_manager = TradeManager(self.websocket, self.message_handler, self.account_manager)
+        self.trade_manager = TradeManager(self.websocket, self.message_handler, self.account_manager, self.market_manager)
         logger.info('ALGO BOT initialized successfully')
 
     def _login(self):
@@ -406,7 +406,9 @@ class IQOptionAlgoAPI:
                 logger.warning(f"Error checking Blitz availability for {asset_name}: {e}")
 
         # 1. Check Digital Options (Only if NOT a seconds-based Blitz request)
-        if not is_seconds:
+        # Digital Options usually only support 1m, 5m, 15m fixed expirations.
+        # If expiry is strictly 2m, 3m, 4m, we should use Binary/Turbo.
+        if not is_seconds and expiry in [1, 5, 15]:
             try:
                 # Get underlying list for digital options
                 digital_assets = self.market_manager.get_underlying_assests('digital-option')

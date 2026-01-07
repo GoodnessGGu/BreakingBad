@@ -11,9 +11,16 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
 from iqclient import IQOptionAlgoAPI as IQOptionAPI
-from settings import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TIMEZONE_OFFSET
+from settings import (
+    TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TIMEZONE_OFFSET,
+    TELEGRAM_API_ID, TELEGRAM_API_HASH, SIGNAL_CHANNELS
+)
+import os
+from telethon import TelegramClient, events
+import logging
 # Import refactored utilities. 
 from utilities import parse_signals, run_trade
+from analysis import check_technical_indicators
 
 # Configure logging
 logging.basicConfig(
@@ -30,28 +37,102 @@ logger = logging.getLogger(__name__)
 
 # Global API instance
 api = None
+# Global Telethon Client
+telethon_client = None
 
 # User Configuration
 USER_CONFIG = {
     "amount": 1.0,           # Default trade amount
     "max_gales": 2,          # Max retries per signal
     "mode": "INDIVIDUAL",    # INDIVIDUAL or COLLECTIVE
-    "collective_multiplier": 1.0  # Multiplier for next signal in Collective mode
+    "collective_multiplier": 1.0,  # Multiplier for next signal in Collective mode
+    "ta_filter": False,            # Default: TA Filter OFF
+    "active_channels": []          # Filter: If empty, ALL allowed. If populated, only these IDs allowed.
+}
+
+# Channel Names Mapping (Ideally passed via environment or learned)
+CHANNEL_NAMES = {
+    int(os.getenv('CHANNEL_ID_1') or 0): "Channel 1",
+    int(os.getenv('CHANNEL_ID_2') or 0): "Channel 2",
+    int(os.getenv('SIGNAL_CHANNEL_ID') or 0): "Signal Channel"
 }
 
 # Active Trades Tracker
 ACTIVE_TRADES = [] # List of dicts: {'asset', 'direction', 'expiry', 'start_time', 'is_seconds'}
+# Trade History (In-Memory for now)
+TRADE_HISTORY = [] # List of finished trade dicts
 
 async def get_main_keyboard():
     """
     Return the main menu keyboard.
     """
+    mode_icon = "👥" if USER_CONFIG['mode'] == "COLLECTIVE" else "👤"
+    ta_icon = "🟢" if USER_CONFIG.get('ta_filter', False) else "🔴"
+    
     keyboard = [
-        [KeyboardButton("💰 Check Balance"), KeyboardButton("ℹ️ Status")],
-        [KeyboardButton("⚙ Config"), KeyboardButton("🔄 Gale Mode")],
+        [KeyboardButton("✅ Start"), KeyboardButton("🛑 Stop")],
+        [KeyboardButton("ℹ️ Status"), KeyboardButton("💰 Check Balance")],
+        [KeyboardButton("📜 History"), KeyboardButton(f"🧠 TA Filter: {ta_icon}")],
+        [KeyboardButton("📡 Channels"), KeyboardButton("⚙ Config")],
         [KeyboardButton("❓ Help")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+async def channels_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    UI to toggle active channels.
+    """
+    chat_id = update.effective_chat.id
+    
+    # Refresh names map
+    keys = {}
+    
+    # Determine allowed list
+    active_ids = USER_CONFIG.get('active_channels', [])
+    if not active_ids:
+        # Default All Active
+        pass
+
+    # Build Keyboard for Channels
+    keyboard = []
+    
+    # We use CHANNEL_NAMES loaded from ENV
+    for cid, cname in CHANNEL_NAMES.items():
+        if not cid: continue
+        
+        # Check if active
+        # Logic: If active_channels is EMPTY => ALL Active.
+        # If populated => Only those in list are Active.
+        
+        is_active = (not active_ids) or (cid in active_ids)
+        
+        status_icon = "✅" if is_active else "❌"
+        btn_text = f"{cname} {status_icon}"
+        # Using CallbackQuery would be better but keeping simple ReplyButton for this architecture
+        # Command style: "CH:12345"
+        keyboard.append([KeyboardButton(f"📡 Toggle {cname}")])
+        keys[f"📡 Toggle {cname}"] = cid # Store mapping
+
+    keyboard.append([KeyboardButton("⬅️ Back")])
+    
+    status_text = "📡 *Channel Configuration*\n\n"
+    if not active_ids:
+        status_text += "🟢 *Mode:* ALL Channels Active\n"
+    else:
+        status_text += "🟡 *Mode:* Filtering Active\n"
+
+    for cid, cname in CHANNEL_NAMES.items():
+        if not cid: continue
+        is_active = (not active_ids) or (cid in active_ids)
+        status_text += f"• {cname}: {'✅' if is_active else '❌'}\n"
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=status_text,
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        parse_mode='Markdown'
+    )
+    return
 
 # --- Configuration Commands ---
 
@@ -307,8 +388,65 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         return
-    elif text == "❓ Help":
-        await help_command(update, context)
+    elif text.startswith("🧠 TA Filter"):
+        # Toggle TA Filter
+        USER_CONFIG['ta_filter'] = not USER_CONFIG['ta_filter']
+        new_state = "ON" if USER_CONFIG['ta_filter'] else "OFF"
+        
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🧠 *TA Filter Switched {new_state}*",
+            reply_markup=await get_main_keyboard(),
+            parse_mode='Markdown'
+        )
+        return
+
+    elif text == "📜 History":
+        await history(update, context)
+        return
+    elif text == "📡 Channels":
+        await channels_command(update, context)
+        return
+    elif text == "⬅️ Back":
+        await context.bot.send_message(
+             chat_id=chat_id,
+             text="🔙 Main Menu",
+             reply_markup=await get_main_keyboard()
+        )
+        return
+    elif text.startswith("📡 Toggle"):
+        # Handle Channel Toggling
+        cname = text.replace("📡 Toggle ", "")
+        target_cid = 0
+        for cid, name in CHANNEL_NAMES.items():
+            if name == cname:
+                target_cid = cid
+                break
+        
+        if target_cid:
+            active_ids = USER_CONFIG.get('active_channels', [])
+            
+            # If list is empty (All Active), we need to populate it with all others except target?
+            # Or simpler logic: If empty, populate with [ALL].
+            
+            if not active_ids:
+                # Switching from ALL -> Explicit
+                active_ids = [k for k in CHANNEL_NAMES.keys() if k]
+            
+            if target_cid in active_ids:
+                active_ids.remove(target_cid)
+            else:
+                active_ids.append(target_cid)
+            
+            # Update Config
+            USER_CONFIG['active_channels'] = active_ids
+            # If empty again (user deselected the last one) -> Reset to ALL mode or keep empty (block all)?
+            # Let's say if empty -> ALL BLOCKED. User must select at least one.
+            # Wait, default is ALL ALLOWED.
+            # If user wants to block all, Stop the bot.
+            
+            # For UI feedback:
+            await channels_command(update, context)
         return
 
     # Security check if restricted
@@ -316,7 +454,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Unauthorized access attempt from {chat_id}")
         return
 
-    signals = parse_signals(text)
+    # Check for SOURCE Header from Listener
+    source_id = 0
+    clean_text = text
+    
+    # Listener sends: "SOURCE:123456\n06:15;..."
+    # Or multiple lines each starting with SOURCE?
+    # Our listener.py implementation does: f"SOURCE:{chat.id};{time_str}..."
+    # So each line has it.
+    
+    # We need to filter signals based on Source ID
+    
+    raw_signals = []
+    
+    # Strategy: Parse "SOURCE:ID;" prefix line by line
+    lines = text.splitlines()
+    allowed_lines = []
+    
+    active_ids = USER_CONFIG.get('active_channels', [])
+    
+    for line in lines:
+        if line.startswith("SOURCE:"):
+            try:
+                # Format: SOURCE:12345;HH:MM...
+                parts = line.split(";", 2) # Limit split to find ID
+                if len(parts) >= 2:
+                    src_tag = parts[0] # SOURCE:12345
+                    sid = int(src_tag.split(":")[1])
+                    
+                    # Filtering Logic
+                    if active_ids and sid not in active_ids:
+                        logger.info(f"🚫 Ignored signal from Channel {sid} (Filtered Out)")
+                        continue
+                    
+                    # Reconstruct line without SOURCE prefix for parser
+                    # parts[1] starts with HH:MM
+                    # We need to join back the rest
+                    clean_line = line.split(";", 1)[1] # Remove SOURCE:ID;
+                    allowed_lines.append(clean_line)
+            except Exception as e:
+                logger.warning(f"Error parsing source header: {e}")
+                # Treat as normal line?
+                allowed_lines.append(line)
+        else:
+            # Direct user input (no source header), always allow
+            allowed_lines.append(line)
+            
+    if not allowed_lines:
+        # Everything filtered out
+        return
+
+    final_text = "\n".join(allowed_lines)
+    signals = parse_signals(final_text)
+    
     if not signals:
         await context.bot.send_message(
             chat_id=chat_id, 
@@ -333,7 +523,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # Process signals
-    asyncio.create_task(process_signals_task(context, chat_id, signals))
+    # Pass context.bot
+    asyncio.create_task(process_signals_task(context.bot, chat_id, signals))
+
+
 
 # ... existing code ...
 
@@ -384,7 +577,7 @@ async def execute_trade_wrapper(api, sig, amount, max_gales):
     }
     ACTIVE_TRADES.append(trade_entry)
     try:
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             run_trade,
             api,
             sig['asset'],
@@ -394,11 +587,27 @@ async def execute_trade_wrapper(api, sig, amount, max_gales):
             max_gales,
             sig['option_type']
         )
+        
+        # Log to History
+        if result:
+            history_entry = {
+                'time': datetime.now().strftime('%H:%M:%S'),
+                'asset': sig['asset'],
+                'direction': sig['direction'],
+                'pnl': result.get('pnl', 0),
+                'status': 'WIN' if result.get('success') else 'LOSS'
+            }
+            TRADE_HISTORY.append(history_entry)
+            # Keep only last 50
+            if len(TRADE_HISTORY) > 50:
+                TRADE_HISTORY.pop(0)
+
+        return result
     finally:
         if trade_entry in ACTIVE_TRADES:
             ACTIVE_TRADES.remove(trade_entry)
 
-async def process_signals_task(context: ContextTypes.DEFAULT_TYPE, chat_id, signals):
+async def process_signals_task(bot, chat_id, signals):
     """
     Schedule and execute trades based on signals with JIT verification.
     """
@@ -408,37 +617,40 @@ async def process_signals_task(context: ContextTypes.DEFAULT_TYPE, chat_id, sign
     # Sort signals by time
     signals.sort(key=lambda x: x['time'])
 
-    # 1. IMMEDIATE VERIFICATION (First Signal)
-    first_sig = signals[0]
-    logger.info(f"🔎 Verifying first signal: {first_sig['asset']}...")
-    try:
-        # Check availability immediately
-        # Run in thread to avoid blocking loop
-        option_type = await asyncio.to_thread(
-            api.check_asset_availability, 
-            first_sig['asset'], 
-            first_sig['expiry'],
-            first_sig.get('is_seconds', False)
-        )
-        
-        if not option_type:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"⚠️ Warning: First signal asset {first_sig['asset']} is currently UNAVAILABLE or CLOSED.\n"
-                     f"This might be a bad signal or market is closed. Scheduling anyway..."
-            )
-        else:
-             await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"✅ First signal verified: {first_sig['asset']} is OPEN ({option_type.value}).\n"
-                     f"All {len(signals)} signals scheduled."
-            )
-    except Exception as e:
-        logger.error(f"Failed to verify first signal: {e}")
+    # 1. IMMEDIATE VERIFICATION REMOVED (User Request)
+    
+    # 2. Send Detailed Summary Head
+    msg = "📥 *Signals Received & Scheduled*\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
+    for s in signals:
+        time_str = s['time'].strftime('%H:%M')
+        # format expiry
+        exp = f"{s['expiry']}s" if s.get('is_seconds') else f"{s['expiry']}m"
+        msg += f"🕒 `{time_str}` {s['asset']} {s['direction'].upper()} {exp}\n"
+    
+    msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
+    msg += f"Total: {len(signals)} signals"
+    
+    await bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
 
-    # Group signals by time
+    # Pre-Filter Stale Signals (older than 60s)
+    current_time = datetime.now(timezone(timedelta(hours=TIMEZONE_OFFSET)))
+    valid_signals = []
+    for s in signals:
+         # Calculate delay relative to NOW
+         # s['time'] is already timezone-aware (system tz)
+         delay = (s['time'] - current_time).total_seconds()
+         if delay < -60: # If signal is more than 60s old
+             logger.warning(f"⚠️ Dropping stale signal: {s['asset']} at {s['time'].strftime('%H:%M')} (Expired {int(abs(delay))}s ago)")
+             continue
+         valid_signals.append(s)
+    
+    if len(valid_signals) < len(signals):
+        await bot.send_message(chat_id=chat_id, text=f"🗑️ Dropped {len(signals) - len(valid_signals)} stale signals.")
+
+    # Group by time for efficient waiting
     grouped = defaultdict(list)
-    for sig in signals:
+    for sig in valid_signals:
         grouped[sig["time"]].append(sig)
 
     for sched_time in sorted(grouped.keys()):
@@ -451,13 +663,19 @@ async def process_signals_task(context: ContextTypes.DEFAULT_TYPE, chat_id, sign
         delay = (target_verification_time - now).total_seconds()
         
         if delay > 0:
-            msg_text = f"⏳ Waiting {int(delay)}s until verification window for {len(grouped[sched_time])} signals at {sched_time.strftime('%H:%M')}..."
+            msg_text = f"⏳ Waiting {int(delay)}s for {len(grouped[sched_time])} signals at {sched_time.strftime('%H:%M')}..."
             logger.info(msg_text)
-            # Optional: Notify user of long waits
-            if delay > 60:
-                await context.bot.send_message(chat_id=chat_id, text=msg_text)
+            # Notify user only if very long wait? User said ONE detailed message head, so maybe suppress these intermediate waits?
+            # Keeping logs, suppressing frequent chat spam unless very long.
+            if delay > 300: 
+                await bot.send_message(chat_id=chat_id, text=msg_text)
             
             await asyncio.sleep(delay)
+        elif delay < -300: # 5 Minutes Stale Threshold
+             msg = f"⏳ Signal for {sched_time.strftime('%H:%M')} is STALE (>{int(abs(delay))}s ago). Skipping."
+             logger.warning(msg)
+             await bot.send_message(chat_id=chat_id, text=msg)
+             continue
         
         # --- JIT VERIFICATION PHASE (T-10s) ---
         logger.info(f"🔎 JIT Verifying signals for {sched_time.strftime('%H:%M')}...")
@@ -474,14 +692,30 @@ async def process_signals_task(context: ContextTypes.DEFAULT_TYPE, chat_id, sign
              )
 
              if option_type:
-                 # Update signal with determined option type
+                 # Update signal with determind option type
                  sig['option_type'] = option_type
+                 
+                 # --- TA FILTER CHECK ---
+                 if USER_CONFIG.get('ta_filter', False):
+                     is_safe = await asyncio.to_thread(
+                         check_technical_indicators, 
+                         api, 
+                         sig['asset'], 
+                         sig['direction']
+                     )
+                     if not is_safe:
+                         msg = f"🧠 *TA Filter SKIP:* {sig['asset']} ({sig['direction']}) rejected by analysis."
+                         logger.info(msg)
+                         await bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+                         continue
+                 # -----------------------
+
                  verified_signals.append(sig)
                  logger.info(f"✅ {sig['asset']} Verified -> {option_type.value}")
              else:
                  msg = f"🚫 *SKIP:* {sig['asset']} unavailable/closed at {sched_time.strftime('%H:%M')}"
                  logger.warning(msg)
-                 await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+                 await bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
 
         if not verified_signals:
             logger.warning(f"No valid signals for {sched_time}. Skipping batch.")
@@ -499,7 +733,7 @@ async def process_signals_task(context: ContextTypes.DEFAULT_TYPE, chat_id, sign
         current_amount = USER_CONFIG['amount'] * USER_CONFIG.get('collective_multiplier', 1)
         current_gales = USER_CONFIG['max_gales']
         
-        await context.bot.send_message(
+        await bot.send_message(
             chat_id=chat_id,
             text=f"🚀 Executing {len(verified_signals)} verified trades now!"
         )
@@ -533,28 +767,62 @@ async def process_signals_task(context: ContextTypes.DEFAULT_TYPE, chat_id, sign
         batch_win = False
         for res in results:
              if res:
-                 await context.bot.send_message(chat_id=chat_id, text=res.get("message", "Trade executed"))
+                 await bot.send_message(chat_id=chat_id, text=res.get("message", "Trade executed"))
                  if res.get("success"):
                      batch_win = True
+        
+        # Send Batch Summary
+        summary_msg = generate_batch_summary(results)
+        await bot.send_message(chat_id=chat_id, text=summary_msg, parse_mode='Markdown')
 
         if USER_CONFIG['mode'] == 'COLLECTIVE':
             if batch_win:
                 USER_CONFIG['collective_multiplier'] = 1.0
-                if not USER_CONFIG['collective_multiplier'] == 1.0: # debug check (optional)
-                    pass
-                msg = "✅ Profit target hit (or win occurred). Collective Martingale reset to x1."
+                msg = "✅ Profit target hit. Collective Martingale reset."
             else:
                 USER_CONFIG['collective_multiplier'] *= 2.0
-                msg = f"❌ Batch loss. Collective Martingale increased to x{USER_CONFIG['collective_multiplier']} for NEXT signal."
+                msg = f"❌ Batch loss. Collective Martingale INCREASED to x{USER_CONFIG['collective_multiplier']}."
             
-            await context.bot.send_message(chat_id=chat_id, text=msg)
+            await bot.send_message(chat_id=chat_id, text=msg)
 
+
+def generate_batch_summary(results):
+    total = len(results)
+    wins = sum(1 for r in results if r and r.get('success'))
+    losses = total - wins
+    total_pnl = sum(r.get('pnl', 0) for r in results if r)
+    
+    emoji = "🟢" if total_pnl >= 0 else "🔴"
+    
+    return (
+        f"📊 *Batch Summary*\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"Total Trades: {total}\n"
+        f"✅ Wins: {wins}\n"
+        f"❌ Losses: {losses}\n"
+        f"💰 Net PnL: {emoji} ${total_pnl:.2f}"
+    )
+
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show last 10 trades."""
+    if not TRADE_HISTORY:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="📜 History is empty.")
+        return
+
+    msg = "📜 *Recent Trade History*\n━━━━━━━━━━━━━━\n"
+    for t in reversed(TRADE_HISTORY[-10:]):
+        icon = "✅" if t['status'] == 'WIN' else "❌"
+        msg += f"{icon} `{t['time']}` {t['asset']} ({t['direction'].upper()}) | ${t['pnl']:.2f}\n"
+    
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='Markdown')
 
 
 async def on_startup(application):
     """
     Send a startup message to the admin.
     """
+    global telethon_client
+    
     if not TELEGRAM_CHAT_ID:
         logger.warning("⚠️ TELEGRAM_CHAT_ID not set. Cannot send startup message.")
         return
@@ -587,6 +855,90 @@ async def on_startup(application):
         )
     except Exception as e:
         logger.error(f"Failed to send startup message: {e}")
+
+    # --- Start Telethon Listener ---
+    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+        logger.warning("⚠️ Telethon API ID/HASH missing. Listener disabled.")
+        return
+
+    logger.info("🎧 Starting Telethon Listener...")
+    try:
+        telethon_client = TelegramClient('anon', int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
+        
+        # Signal Batching/Buffer Variables
+        BATCH_BUFFER = []
+        BATCH_TIMER = None
+
+        async def flush_batch():
+            """
+            Process all buffered signals at once.
+            """
+            nonlocal BATCH_BUFFER
+            if not BATCH_BUFFER: return
+            
+            # Copy and clear buffer
+            signals_to_process = BATCH_BUFFER.copy()
+            BATCH_BUFFER.clear()
+            
+            logger.info(f"📤 Flushing batch: {len(signals_to_process)} accumulated signals")
+            
+            # Trigger Bot Task with ALL signals
+            asyncio.create_task(
+                 process_signals_task(application.bot, TELEGRAM_CHAT_ID, signals_to_process)
+            )
+
+        # Register Handler with closure to capture 'application.bot'
+        @telethon_client.on(events.NewMessage(chats=SIGNAL_CHANNELS))
+        async def bridge_handler(event):
+             chat = await event.get_chat()
+             chat_id = chat.id
+             text = event.message.text
+             
+             # Filter
+             active_ids = USER_CONFIG.get('active_channels', [])
+             if active_ids and chat_id not in active_ids:
+                 return
+             
+             signals = parse_signals(text)
+             # Use the global parse_signals which uses 'parse_standard_signal' etc.
+             
+             if signals:
+                 logger.info(f"📥 Listener: {len(signals)} signals from {getattr(chat, 'title', chat_id)}")
+                 
+                 # Add to Buffer
+                 BATCH_BUFFER.extend(signals)
+                 logger.info(f"Buffersize: {len(BATCH_BUFFER)}") # Check if buffer grows
+                 
+                 # Debounce: Cancel pending flush, start new one
+                 nonlocal BATCH_TIMER
+                 if BATCH_TIMER and not BATCH_TIMER.done():
+                     BATCH_TIMER.cancel()
+                 
+                 try: 
+                    BATCH_TIMER = asyncio.create_task(wait_and_flush())
+                    logger.info("Started/Restarted Batch Timer") 
+                 except Exception as e:
+                    logger.error(f"Failed to start batch timer: {e}")
+
+        async def wait_and_flush():
+             # Wait 5 seconds for more signals
+             try:
+                 await asyncio.sleep(5)
+                 await flush_batch()
+             except asyncio.CancelledError:
+                 pass
+             except Exception as e:
+                 logger.error(f"❌ Error in wait_and_flush: {e}")
+
+        await telethon_client.start()
+        logger.info("✅ Telethon Client Started & Authenticated")
+        
+        # Run in background
+        asyncio.create_task(telethon_client.run_until_disconnected())
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to start Telethon: {e}")
+
 
 
 async def monitor_connection(context: ContextTypes.DEFAULT_TYPE):

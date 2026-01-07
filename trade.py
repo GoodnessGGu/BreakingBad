@@ -27,27 +27,57 @@ class TradeManager:
     Handles trade parameter validation, order execution, confirmation waiting,
     and trade outcome tracking.
     """
-    def __init__(self, websocket_manager, message_handler, account_manager):
+    def __init__(self, websocket_manager, message_handler, account_manager, market_manager=None):
         self.ws_manager = websocket_manager
         self.message_handler = message_handler
         self.account_manager = account_manager
+        self.market_manager = market_manager
 
     def get_asset_id(self, asset_name: str) -> int:
         """
         Get numeric asset ID for trading asset name.
-        
-        Args:
-            asset_name: Trading asset name (e.g., 'EURUSD-op', 'EURUSD-OTC')
-            
-        Returns:
-            Asset ID for API calls
-            
-        Raises:
-            KeyError: If asset not found
+        Prioritizes dynamic lookup via MarketManager, falls back to static list.
         """
+        # 1. Dynamic Lookup
+        if self.market_manager:
+            try:
+                # Check Digital
+                digitals = self.market_manager.get_underlying_assests('digital-option')
+                for d in digitals:
+                    if d.get('name') == asset_name or d.get('ticker') == asset_name:
+                         aid = int(d['active_id'])
+                         logger.info(f"🔍 Dynamic ID Lookup (Digital): {asset_name} -> {aid}")
+                         return aid
+            except Exception as e: 
+                logger.warning(f"Dynamic Digital Lookup Error: {e}")
+
+            try:
+                # Check Binary/Turbo
+                binaries = self.market_manager.get_underlying_assests('binary-option')
+                # Try Turbo First
+                if 'turbo' in binaries:
+                    actives = binaries['turbo'].get('actives', {})
+                    for aid, info in actives.items():
+                        if info.get('name') == asset_name or info.get('ticker') == asset_name:
+                            logger.info(f"🔍 Dynamic ID Lookup (Turbo): {asset_name} -> {aid}")
+                            return int(aid)
+                # Try Binary
+                if 'binary' in binaries:
+                     actives = binaries['binary'].get('actives', {})
+                     for aid, info in actives.items():
+                        if info.get('name') == asset_name or info.get('ticker') == asset_name:
+                            logger.info(f"🔍 Dynamic ID Lookup (Binary): {asset_name} -> {aid}")
+                            return int(aid)
+            except Exception as e:
+                logger.warning(f"Dynamic Binary Lookup Error: {e}")
+
+        # 2. Static Fallback
         if asset_name in UNDERLYING_ASSESTS:
-            return UNDERLYING_ASSESTS[asset_name]
-        raise KeyError(f'{asset_name} not found!')
+            aid = UNDERLYING_ASSESTS[asset_name]
+            logger.warning(f"⚠️ Static Fallback ID: {asset_name} -> {aid}")
+            return aid
+            
+        raise KeyError(f'{asset_name} not found in Dynamic or Static lists!')
 
     def _place_digital_option_trade(self, asset:str, amount:float, direction:str, expiry:int=1):
         """
@@ -140,6 +170,8 @@ class TradeManager:
 
         # Build instrument ID following IQOption format
         instrument_id = f"do{active_id}A{date_formatted[:8]}D{date_formatted[8:]}00T{expiry}M{direction}SPT"
+        
+        logger.info(f"📦 Constructed Digital Instrument ID: {instrument_id} (Active: {active_id})")
 
         return {
             "name": "digital-options.place-digital-option",
