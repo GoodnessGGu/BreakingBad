@@ -171,12 +171,14 @@ def run_trade(api, asset, direction, expiry, amount, max_gales=2, option_type: O
                 return {"success": False, "message": f"❌ Failed to place trade: {order_result}"}
 
             order_id = order_result
+            
+            # Fetch details for logging
+            currency = api.get_currency()
             logger.info(f"🎯 Placed trade: {asset} {direction.upper()} {currency}{current_amount} (Expiry {expiry}m)")
             
             success_outcome, trade_data = api.get_trade_outcome(order_id, expiry=expiry, option_type=option_type)
             
             balance = api.get_current_account_balance()
-            currency = api.get_currency()
 
             if success_outcome and trade_data:
                 pnl = float(trade_data.get('pl_amount', 0))
