@@ -64,6 +64,8 @@ class AccountManager:
                     self.available_accounts['demo'] = balance
                 elif balance['type'] == 1:  # Real account
                     self.available_accounts['real'] = balance
+                elif balance['type'] == 2:  # Tournament account
+                    self.available_accounts['tournament'] = balance
 
             # Set current account ID based on the configured account type
             self.current_account_id = self.available_accounts[self.current_account_type]['id']
@@ -166,8 +168,8 @@ class AccountManager:
         if account_type.lower() == 'practice':
             return 'demo'
 
-        if account_type.lower() not in ['real', 'demo']:
-            logger.error(f"{account_type} is Invalid Account Type! Needs to one of ['real', 'demo']")
+        if account_type.lower() not in ['real', 'demo', 'tournament']:
+            logger.error(f"{account_type} is Invalid Account Type! Needs to one of ['real', 'demo', 'tournament']")
             if exit:
                 sys.exit()
             return
@@ -199,12 +201,17 @@ class AccountManager:
         target_account_id = None
         for account in accounts:
             if ((account_type == 'real' and account['type'] == 1) or 
-                (account_type == 'demo' and account['type'] == 4)):
+                (account_type == 'demo' and account['type'] == 4) or 
+                (account_type == 'tournament' and account['type'] == 2)):
                 target_account_id = account['id']
                 break
 
         # Update portfolio subscription to new account
-        self._set_portfolio_subscription(target_account_id)
+        if target_account_id:
+             self._set_portfolio_subscription(target_account_id)
+        else:
+             logger.error(f"Could not find account for type '{account_type}'")
+             return False
 
         # Verify switch was successful and update current account type
         if self.current_account_id == target_account_id:
@@ -212,6 +219,9 @@ class AccountManager:
             logger.info(f'Successfully switched to {account_type.capitalize()} Account'
                         f'(ID: {target_account_id}, Balance: {self.get_active_account_balance()})')
             return True
+        else:
+             logger.error(f"Failed to switch. Target ID {target_account_id} not applied.")
+             return False
 
     
     def _set_portfolio_subscription(self, account_id:int)-> None:

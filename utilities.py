@@ -171,11 +171,12 @@ def run_trade(api, asset, direction, expiry, amount, max_gales=2, option_type: O
                 return {"success": False, "message": f"❌ Failed to place trade: {order_result}"}
 
             order_id = order_result
-            logger.info(f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} (Expiry {expiry}m)")
+            logger.info(f"🎯 Placed trade: {asset} {direction.upper()} {currency}{current_amount} (Expiry {expiry}m)")
             
-            success_outcome, trade_data = api.get_trade_outcome(order_id, expiry=expiry)
+            success_outcome, trade_data = api.get_trade_outcome(order_id, expiry=expiry, option_type=option_type)
             
             balance = api.get_current_account_balance()
+            currency = api.get_currency()
 
             if success_outcome and trade_data:
                 pnl = float(trade_data.get('pl_amount', 0))
@@ -183,14 +184,22 @@ def run_trade(api, asset, direction, expiry, amount, max_gales=2, option_type: O
                 if pnl > 0:
                     msg = ""
                     if gale == 0:
-                        msg = f"✅ Direct WIN on {asset} | Profit: ${pnl:.2f} | Balance: ${balance:.2f}"
+                        msg = (
+                            f"✅ *WIN* on {asset} ({direction.upper()})\n"
+                            f"💵 *Profit:* +{currency}{pnl:.2f}\n"
+                            f"💰 *Balance:* {currency}{balance:.2f}"
+                        )
                     else:
-                        msg = f"🔥 WIN after Gale {gale} on {asset} | Profit: ${pnl:.2f} | Balance: ${balance:.2f}"
-                    logger.info(msg)
+                        msg = (
+                            f"🔥 *WIN* after Gale {gale} on {asset}\n"
+                            f"💵 *Profit:* +{currency}{pnl:.2f}\n"
+                            f"💰 *Balance:* {currency}{balance:.2f}"
+                        )
+                    logger.info(msg.replace('*', '').replace('\n', ' | '))
                     return {"success": True, "pnl": pnl, "gale": gale, "message": msg}
                 else:
                     logger.warning(
-                        f"⚠️ LOSS on {asset} | Attempt {gale} | PnL: {pnl} | Balance: ${balance:.2f}"
+                        f"⚠️ LOSS on {asset} | Attempt {gale} | PnL: {pnl:.2f} | Balance: {currency}{balance:.2f}"
                     )
                     current_amount *= 2  # Martingale
             else:
@@ -199,8 +208,12 @@ def run_trade(api, asset, direction, expiry, amount, max_gales=2, option_type: O
 
         except Exception as e:
             logger.error(f"Error in run_trade loop: {e}")
-            return {"success": False, "message": f"Error: {e}"}
+            return {"success": False, "message": f"❌ Error: {e}"}
 
-    msg = f"💀 Lost all attempts (Direct + {max_gales} Gales) on {asset}"
-    logger.error(msg)
+    msg = (
+        f"💀 *LOSS* on {asset}\n"
+        f"❌ Lost all attempts ({max_gales} gales)\n"
+        f"💸 *Total Loss:* -${amount:.2f}"
+    )
+    logger.error(msg.replace('*', '').replace('\n', ' | '))
     return {"success": False, "pnl": -amount, "gale": max_gales, "message": msg}

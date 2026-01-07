@@ -12,7 +12,7 @@ WS_URL = 'wss://ws.iqoption.com/echo/websocket'
 EMAIL = os.getenv('email')
 PASSWORD = os.getenv('password')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID') # Optional, for restricting access
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID') or os.getenv('ADMIN_ID') # Optional, for restricting access
 
 
 DEFAULT_ACCOUNT_TYPE = 'demo' # REAL/DEMO/real/demo

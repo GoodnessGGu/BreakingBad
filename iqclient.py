@@ -125,6 +125,19 @@ class IQOptionAlgoAPI:
             # Set default account and mark as connected
             self.account_manager.set_default_account()
             self._connected = True
+
+    def connect(self):
+        """
+        Public method to establish connection.
+        Returns:
+            bool: True if connected successfully
+        """
+        self._connect()
+        return self._connected
+
+    def is_connected(self):
+        """Return connection status."""
+        return self._connected
     
     # Expose manager methods for convenience
     def get_current_account_balance(self):
@@ -136,6 +149,48 @@ class IQOptionAlgoAPI:
         """
         self._ensure_connected()
         return self.account_manager.get_active_account_balance()
+        
+    def get_currency(self) -> str:
+        """
+        Get the currency symbol or code for the active account.
+        Defaults to '$' if not found.
+        """
+        self._ensure_connected()
+        try:
+             # Get current account ID
+             current_id = self.account_manager.current_account_id
+             
+             # Symbol mapping
+             start_map = {
+                 'USD': '$',
+                 'NGN': '₦',
+                 'EUR': '€',
+                 'GBP': '£',
+                 'BRL': 'R$'
+             }
+             
+             # Locate account in available accounts
+             # Check demo/real cache first
+             for acc_type in ['real', 'demo', 'tournament']:
+                 acc = self.account_manager.available_accounts.get(acc_type)
+                 if acc and acc['id'] == current_id:
+                     code = acc.get('currency', '')
+                     return start_map.get(code, code if code else '$')
+            
+             # Fallback: check profile balances list directly if cache missed
+             if self.message_handler.profile_msg:
+                 balances = self.message_handler.profile_msg['msg']['balances']
+                 for b in balances:
+                     if b['id'] == current_id:
+                         return b.get('currency_char', b.get('currency', '$'))
+
+             # Old fallback
+             if self.message_handler.profile_msg:
+                 msg = self.message_handler.profile_msg.get('msg', {})
+                 return msg.get('currency_char', msg.get('currency', '$'))
+        except:
+            pass
+        return "$"
     
     def refill_demo_account(self, amount=10000):
         """
@@ -291,19 +346,20 @@ class IQOptionAlgoAPI:
                 expiry=trade_params.expiry # Expiry in seconds for Blitz
             )
         
-    def get_trade_outcome(self, order_id: int ,expiry:int):
+    def get_trade_outcome(self, order_id: int ,expiry:int, option_type: Optional[OptionType] = None):
         """
         Get the outcome of a completed trade.
         
         Args:
             order_id (int): ID of the trade order
-            expiry (int): Expiry time in minutes
+            expiry (int): Expiry time 
+            option_type (OptionType): Option type for strategy determination
             
         Returns:
             dict: Trade outcome (win/loss/refund) and payout details
         """
         self._ensure_connected()
-        return self.trade_manager.get_trade_outcome(order_id, expiry=expiry)
+        return self.trade_manager.get_trade_outcome(order_id, expiry=expiry, option_type=option_type)
 
     def check_asset_availability(self, asset_name: str, expiry: int = 1, is_seconds: bool = False) -> Optional[OptionType]:
         """
@@ -357,7 +413,7 @@ class IQOptionAlgoAPI:
                 # Usually Turbo min is 1m, so unlikely. But we can try 'turbo'.
                 group = 'turbo'
             else:
-                group = 'turbo' if expiry < 5 else 'binary'
+                group = 'turbo' if expiry <= 5 else 'binary'
             
             if group in binary_data:
                 actives = binary_data[group].get('actives', {})

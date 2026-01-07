@@ -1,8 +1,10 @@
 import time
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 from options_assests import UNDERLYING_ASSESTS
 from utilities import get_expiry_timestamp, get_remaining_secs, get_expiry_timestamp_seconds
+from models import OptionType
 
 
 logger = logging.getLogger(__name__)
@@ -190,8 +192,8 @@ class TradeManager:
 
             expiration = get_expiry_timestamp(self.message_handler.server_time, expiry)
 
-            if expiry < 5:
-                option_type_id = 3 # turbo (exp > 5mins )
+            if expiry <= 5:
+                option_type_id = 3 # turbo (exp <= 5mins )
             else:
                 option_type_id = 1 # binary ( exp > 5 mins )
 
@@ -251,20 +253,27 @@ class TradeManager:
             logger.error(f"Blitz trade failed: {e}")
             return False, str(e)
 
-    def get_trade_outcome(self, order_id: int, expiry:int=1):
+    def get_trade_outcome(self, order_id: int, expiry:int=1, option_type: Optional[OptionType] = None):
         """
         Monitor trade and return outcome when closed.
         
         Args:
             order_id: Order ID to monitor
-            expiry: Original expiry time in minutes for timeout calculation
+            expiry: Original expiry time (minutes for Digital/Binary, seconds for Blitz)
+            option_type: Type of option to determine timeout calculation strategy
             
         Returns:
             tuple: (success: bool, pnl: float or None)
-                success=True with PnL if trade closed, False if timeout
         """
         start_time = time.time()
-        timeout = get_remaining_secs(self.message_handler.server_time, expiry)
+        
+        # Calculate appropriate timeout based on option type
+        if option_type == OptionType.BLITZ_OPTION:
+            # For Blitz, expiry is already in seconds. Add small buffer.
+            timeout = expiry + 10
+        else:
+            # For Digital/Binary, expiry is minutes. Calculate remaining seconds.
+            timeout = get_remaining_secs(self.message_handler.server_time, expiry)
 
         # Poll for trade closure with timeout + 3-second buffer
         while time.time() - start_time < timeout + 3:

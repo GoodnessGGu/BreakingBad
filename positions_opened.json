@@ -1,3 +1,19 @@
 {
-    "id": 20629783194
+    "user_id": 122013509,
+    "id": 13491555363,
+    "refund_value": 0,
+    "price": 2,
+    "exp": 1767772680,
+    "created": 1767772381,
+    "created_millisecond": 1767772381574,
+    "time_rate": 1767772381,
+    "type": "turbo",
+    "act": 1861,
+    "direction": "call",
+    "exp_value": 1168110,
+    "value": 1.16811,
+    "profit_income": 185,
+    "profit_return": 0,
+    "robot_id": null,
+    "client_platform_id": 82
 }
